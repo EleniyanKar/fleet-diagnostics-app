@@ -89,9 +89,9 @@ def safe_read_file(file_source):
 uploaded_file = st.file_uploader("Upload new fleet report (Optional - overrides default dataset)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (Optional - for verified network identification)", type=["csv", "xlsx"])
 
-# Default dataset search
-DEFAULT_FILES = ["devices_report.csv", "devices_report_1789914045.csv"]
-default_path = next((f for f in DEFAULT_FILES if os.path.exists(f)), None)
+# Default dataset search (only picks valid non-empty files)
+DEFAULT_FILES = ["devices_report_1789914045.csv", "devices_report.csv"]
+default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.getsize(f) > 0), None)
 
 # Process Airtel Verification File
 airtel_numbers = set()
