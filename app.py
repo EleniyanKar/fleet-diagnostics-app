@@ -24,43 +24,6 @@ ADMIN_EMAILS = {
     "blessing@catracker.ng", "dammylola@catracker.ng",
 }
 
-# 1. Enhanced Phone Cleaner
-def clean_phone(val):
-    """Standardizes Nigerian MSISDNs, removes Excel floats (.0), and fixes prefixes."""
-    if pd.isna(val) or str(val).lower() in ["nan", "none", ""]:
-        return ""
-    s = str(val).split(".")[0].strip()  # Strip trailing Excel float .0
-    digits = "".join(c for c in s if c.isdigit())
-    if not digits:
-        return ""
-    if digits.startswith("234") and len(digits) == 13:
-        digits = "0" + digits[3:]
-    elif len(digits) == 10 and digits.startswith(("7", "8", "9")):
-        digits = "0" + digits
-    return digits
-
-
-# 2. Tail Extractor for Infallible Matching
-def extract_tail(val, tail_len=7):
-    cleaned = clean_phone(val)
-    return cleaned[-tail_len:] if len(cleaned) >= tail_len else ""
-
-
-# 3. Network Matcher with Tail Lookup
-def sim_network(sim, airtel_tails_set):
-    sim_clean = clean_phone(sim)
-    if not sim_clean:
-        return "Missing"
-    
-    # Check if last 7 digits match the verified Airtel list
-    sim_tail = sim_clean[-7:] if len(sim_clean) >= 7 else ""
-    if sim_tail and sim_tail in airtel_tails_set:
-        return "Airtel (verified)"
-    
-    # Fallback to Nigerian telecom prefix lookup
-    prefix = sim_clean[:4]
-    return PREFIX_TO_NETWORK.get(prefix, "Unknown/Other (guessed)")
-
 # 3. Telecom Network Prefixes (Nigeria)
 NETWORK_PREFIXES = {
     "MTN": ["0803","0806","0703","0706","0813","0816","0810","0814","0903","0906","0913","0916","0704"],
@@ -73,12 +36,10 @@ PREFIX_TO_NETWORK = {p: net for net, prefixes in NETWORK_PREFIXES.items() for p 
 
 # 4. Helper Functions
 def clean_phone(val):
-    """Standardizes Nigerian MSISDNs to 11-digit strings starting with '0'."""
-    if pd.isna(val) or str(val).lower() == "nan":
+    """Standardizes Nigerian MSISDNs, strips Excel .0 floats, spaces, and country codes."""
+    if pd.isna(val) or str(val).lower() in ["nan", "none", ""]:
         return ""
-    s = str(val).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
+    s = str(val).split(".")[0].strip()
     digits = "".join(c for c in s if c.isdigit())
     if not digits:
         return ""
@@ -89,15 +50,26 @@ def clean_phone(val):
     return digits
 
 
-def sim_network(sim, airtel_set):
-    """Categorizes SIM by cross-referencing verified Airtel list or prefix dictionary."""
+def extract_tail(val, tail_len=7):
+    """Extracts last N digits for reliable cross-dataset matching."""
+    cleaned = clean_phone(val)
+    return cleaned[-tail_len:] if len(cleaned) >= tail_len else ""
+
+
+def sim_network(sim, airtel_tails_set):
+    """Categorizes SIM by tail matching against Airtel list or prefix dictionary."""
     sim_clean = clean_phone(sim)
     if not sim_clean:
         return "Missing"
-    if sim_clean in airtel_set:
+    
+    # Check tail match against verified Airtel list
+    sim_tail = sim_clean[-7:] if len(sim_clean) >= 7 else ""
+    if sim_tail and sim_tail in airtel_tails_set:
         return "Airtel (verified)"
+    
+    # Fallback to telecom prefix dictionary
     prefix = sim_clean[:4]
-    return PREFIX_TO_NETWORK.get(prefix, "Unknown/Other (guessed)")
+    return PREFIX_TO_NETWORK.get(prefix, "Unknown/Other")
 
 
 def extract_customer_emails(users_str):
@@ -133,30 +105,20 @@ airtel_file = st.file_uploader("Upload Airtel SIM list (Optional - for verified 
 DEFAULT_FILES = ["devices_report.csv.csv", "devices_report_1789914045.csv", "devices_report.csv"]
 default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.getsize(f) > 0), None)
 
-# Process Airtel Verification File
-airtel_numbers = set()
-if airtel_file is not None:
-    airtel_df = safe_read_file(airtel_file)
-    airtel_df.columns = airtel_df.columns.str.replace("\ufeff", "", regex=False).str.strip()
-    if "MSISDN" in airtel_df.columns:
-        airtel_numbers = set(airtel_df["MSISDN"].apply(clean_phone))
-        airtel_numbers.discard("")
-        st.write(f"Loaded **{len(airtel_numbers):,} Airtel numbers** for cross-reference.")
-    else:
-        st.error(f"Couldn't find an 'MSISDN' column in Airtel file. Found columns: {list(airtel_df.columns)}")
-
 # Process Airtel Verification File using Tail Matching
-airtel_numbers = set()
+airtel_tails = set()
 if airtel_file is not None:
     airtel_df = safe_read_file(airtel_file)
     airtel_df.columns = airtel_df.columns.str.replace("\ufeff", "", regex=False).str.strip()
-    if "MSISDN" in airtel_df.columns:
-        # Extract last 7 digits of all verified Airtel lines
-        airtel_numbers = set(airtel_df["MSISDN"].apply(extract_tail))
-        airtel_numbers.discard("")
-        st.write(f"Loaded **{len(airtel_numbers):,} verified Airtel lines** for cross-reference.")
+    
+    # Locate MSISDN or SIM number column
+    msisdn_col = next((c for c in airtel_df.columns if "msisdn" in c.lower() or "phone" in c.lower() or "sim" in c.lower()), None)
+    if msisdn_col:
+        airtel_tails = set(airtel_df[msisdn_col].apply(extract_tail))
+        airtel_tails.discard("")
+        st.write(f"Loaded **{len(airtel_tails):,} verified Airtel lines** for cross-reference.")
     else:
-        st.error(f"Couldn't find an 'MSISDN' column in Airtel file. Found columns: {list(airtel_df.columns)}")
+        st.error(f"Couldn't find an MSISDN/Phone column in Airtel file. Found columns: {list(airtel_df.columns)}")
 
 
 # 6. Fleet Dataset Loading & Execution
@@ -178,7 +140,6 @@ df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
 df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
 df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
-# Extract Expiration Year and Month attributes
 df["expiration_year"] = df["expiration_date"].dt.year
 df["expiration_month_num"] = df["expiration_date"].dt.month
 df["expiration_month_name"] = df["expiration_date"].dt.strftime("%B")
@@ -207,7 +168,8 @@ expiring_30d = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30)]
 active_vehicles = df[df["active"] == 1] if "active" in df.columns else df.head(0)
 active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
 
-df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers)) if "sim_number" in df.columns else "Missing"
+# Network Categorization using Tail Matching
+df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_tails)) if "sim_number" in df.columns else "Missing"
 network_breakdown = df["sim_network"].value_counts()
 offline_by_network = df[df["hours_offline"] > 24]["sim_network"].value_counts()
 
@@ -244,7 +206,7 @@ stats = {
     "reporting_24h": len(reporting_24h),
     "not_reporting": len(not_reporting),
     "expired_last_24h": len(expired_24h),
-    "expired_last_30d": len(expired_30d),  # Corrected variable name reference
+    "expired_last_30d": len(expired_30d),
     "expired_total": len(expired_total),
     "expiring_next_24h": len(expiring_24h),
     "expiring_next_30d": len(expiring_30d),
@@ -336,11 +298,15 @@ st.subheader("📵 Offline Devices by Network")
 st.bar_chart(offline_by_network)
 
 st.subheader("📵 Airtel SIMs Offline 48+ Hours")
+
+# Filter catches ALL Airtel SIMs (verified via upload OR prefix-matched)
 airtel_offline_48h = df[
-    (df["sim_network"] == "Airtel (verified)") & (df["hours_offline"] >= 48)
+    (df["sim_network"].str.contains("Airtel", case=False, na=False)) & 
+    (df["hours_offline"] >= 48)
 ][["id", "name", "plate_number", "sim_number", "last_connect_time", "hours_offline"]].sort_values(
     "hours_offline", ascending=False
 )
+
 st.write(f"**{len(airtel_offline_48h):,} Airtel SIMs** have not reported in 48+ hours.")
 st.dataframe(airtel_offline_48h, use_container_width=True)
 st.download_button(
