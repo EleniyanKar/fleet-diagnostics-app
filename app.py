@@ -109,16 +109,20 @@ default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.g
 airtel_tails = set()
 if airtel_file is not None:
     airtel_df = safe_read_file(airtel_file)
-    airtel_df.columns = airtel_df.columns.str.replace("\ufeff", "", regex=False).str.strip()
+    airtel_df.columns = airtel_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
     
-    msisdn_col = next((c for c in airtel_df.columns if "msisdn" in c.lower() or "phone" in c.lower() or "sim" in c.lower()), None)
+    # Flexible column search for Phone/SIM/Line headers
+    msisdn_col = next(
+        (c for c in airtel_df.columns if any(k in c.lower() for k in ["msisdn", "phone", "sim", "line", "number", "mobile", "airtel"])), 
+        airtel_df.columns[0]  # Fallback to 1st column
+    )
+    
     if msisdn_col:
         airtel_tails = set(airtel_df[msisdn_col].apply(extract_tail))
         airtel_tails.discard("")
-        st.write(f"Loaded **{len(airtel_tails):,} verified Airtel lines** for cross-reference.")
+        st.write(f"Loaded **{len(airtel_tails):,} verified Airtel lines** from column `{msisdn_col}` for cross-reference.")
     else:
-        st.error(f"Couldn't find an MSISDN/Phone column in Airtel file. Found columns: {list(airtel_df.columns)}")
-
+        st.error(f"Couldn't find a valid SIM/Phone column in Airtel file. Found columns: {list(airtel_df.columns)}")
 
 # 6. Fleet Dataset Loading & Execution
 if uploaded_file is not None:
