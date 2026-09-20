@@ -75,9 +75,14 @@ def extract_customer_emails(users_list_value):
     return result
 
 
-uploaded_file = st.file_uploader("Choose your fleet CSV file", type="csv")
+# 1. UI File Uploaders
+uploaded_file = st.file_uploader("Upload a new fleet report (Optional - overrides default data)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (optional, for accurate network ID)", type=["csv", "xlsx"])
 
+# Default dataset inside your GitHub repository
+DEFAULT_FLEET_FILE = "devices_report_1789914045.csv"
+
+# 2. Process Airtel Verification File
 airtel_numbers = set()
 if airtel_file is not None:
     if airtel_file.name.endswith(".xlsx"):
@@ -87,11 +92,26 @@ if airtel_file is not None:
     airtel_df.columns = airtel_df.columns.str.replace("\ufeff", "", regex=False).str.strip()
 
     if "MSISDN" not in airtel_df.columns:
-        st.error("Couldn't find an 'MSISDN' column. Found these instead: " + str(list(airtel_df.columns)))
+        st.error(f"Couldn't find an 'MSISDN' column. Found these instead: {list(airtel_df.columns)}")
     else:
-        cleaned = airtel_df["MSISDN"].astype(str).str.strip().str.replace(r"\D", "", regex=True)
-        airtel_numbers = set(cleaned)
-        st.write("Loaded " + str(len(airtel_numbers)) + " Airtel numbers for cross-reference.")
+        airtel_numbers = set(airtel_df["MSISDN"].apply(clean_phone))
+        airtel_numbers.discard("")
+        st.write(f"Loaded {len(airtel_numbers):,} Airtel numbers for cross-reference.")
+
+
+# 3. Automatically Load Dataset on Startup
+if uploaded_file is not None:
+    if uploaded_file.name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(uploaded_file)
+    else:
+        df = pd.read_csv(uploaded_file, sep=None, engine="python", encoding="utf-8-sig")
+    st.info(f"Loaded uploaded file: **{uploaded_file.name}**")
+elif os.path.exists(DEFAULT_FLEET_FILE):
+    df = pd.read_csv(DEFAULT_FLEET_FILE, sep=None, engine="python", encoding="utf-8-sig")
+    st.info(f"Displaying default dataset (**{DEFAULT_FLEET_FILE}**)")
+else:
+    st.warning("No fleet dataset found in repository. Please upload a CSV file.")
+    st.stop()
 
 
 if uploaded_file is not None:
