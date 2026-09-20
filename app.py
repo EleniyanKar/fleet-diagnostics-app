@@ -80,7 +80,7 @@ uploaded_file = st.file_uploader("Upload a new fleet report (Optional - override
 airtel_file = st.file_uploader("Upload Airtel SIM list (optional, for accurate network ID)", type=["csv", "xlsx"])
 
 # Default dataset inside your GitHub repository
-DEFAULT_FLEET_FILE = "devices_report_1789914045.csv"
+DEFAULT_FLEET_FILE = "devices_report.csv"
 
 # 2. Process Airtel Verification File
 airtel_numbers = set()
