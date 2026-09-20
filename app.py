@@ -128,6 +128,11 @@ df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
 df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
 df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
+# Extract Expiration Year and Month attributes
+df["expiration_year"] = df["expiration_date"].dt.year
+df["expiration_month_num"] = df["expiration_date"].dt.month
+df["expiration_month_name"] = df["expiration_date"].dt.strftime("%B")
+
 now = pd.Timestamp.now()
 df["hours_offline"] = (now - df["last_connect_time"]).dt.total_seconds() / 3600
 df["days_to_expiry"] = (df["expiration_date"] - now).dt.total_seconds() / 86400
@@ -186,7 +191,7 @@ stats = {
     "reporting_24h": len(reporting_24h),
     "not_reporting": len(not_reporting),
     "expired_last_24h": len(expired_24h),
-    "expired_last_30d": len(expired_30d),
+    "expired_last_30d": len(expired_last_30d),
     "expired_total": len(expired_total),
     "expiring_next_24h": len(expiring_24h),
     "expiring_next_30d": len(expiring_30d),
@@ -214,6 +219,64 @@ c5.metric("Expired (last 24h)", stats["expired_last_24h"])
 c6.metric("Expired (last 30d)", stats["expired_last_30d"])
 c7.metric("Expiring (next 24h)", stats["expiring_next_24h"])
 c8.metric("Expiring (next 30d)", stats["expiring_next_30d"])
+
+# --- NEW: BATCHED EXPIRATION BY YEAR & MONTH FILTER ---
+st.write("---")
+st.subheader("📅 Expiration Batches (2023 - 2027) & Monthly Filter")
+
+TARGET_YEARS = [2023, 2024, 2025, 2026, 2027]
+MONTH_OPTIONS = [
+    "All Months", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+]
+
+col_years, col_month = st.columns([2, 1])
+
+with col_years:
+    selected_years = st.multiselect(
+        "Select Expiration Year Batches:",
+        options=TARGET_YEARS,
+        default=TARGET_YEARS
+    )
+
+with col_month:
+    selected_month = st.selectbox(
+        "Filter by Expiration Month:",
+        options=MONTH_OPTIONS
+    )
+
+# Filter dataset by selected years and month
+filtered_batch_df = df[df["expiration_year"].isin(selected_years)].copy()
+if selected_month != "All Months":
+    filtered_batch_df = filtered_batch_df[filtered_batch_df["expiration_month_name"] == selected_month]
+
+st.write(
+    f"Found **{len(filtered_batch_df):,} vehicles** matching the selected year and month criteria."
+)
+
+# Display Tabs for Each Year Batch
+if selected_years:
+    year_tabs = st.tabs([f"📆 {yr}" for yr in sorted(selected_years)])
+    for idx, yr in enumerate(sorted(selected_years)):
+        with year_tabs[idx]:
+            yr_df = filtered_batch_df[filtered_batch_df["expiration_year"] == yr].sort_values("expiration_date")
+            st.metric(f"Vehicles Expiring/Expired in {yr}", f"{len(yr_df):,} units")
+            
+            if not yr_df.empty:
+                display_cols = ["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date", "days_to_expiry"]
+                available_cols = [c for c in display_cols if c in yr_df.columns]
+                st.dataframe(yr_df[available_cols], use_container_width=True)
+                
+                st.download_button(
+                    f"⬇️ Download {yr} Expiration List (CSV)",
+                    yr_df[available_cols].to_csv(index=False),
+                    f"fleet_expirations_{yr}_{selected_month.lower().replace(' ', '_')}.csv",
+                    "text/csv",
+                    key=f"dl_btn_{yr}"
+                )
+            else:
+                st.info(f"No vehicles found expiring in {yr} for the selected month ({selected_month}).")
+st.write("---")
 
 st.subheader("📡 Network Breakdown (SIM)")
 st.bar_chart(network_breakdown)
