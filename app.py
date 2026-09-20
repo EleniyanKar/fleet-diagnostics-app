@@ -24,6 +24,43 @@ ADMIN_EMAILS = {
     "blessing@catracker.ng", "dammylola@catracker.ng",
 }
 
+# 1. Enhanced Phone Cleaner
+def clean_phone(val):
+    """Standardizes Nigerian MSISDNs, removes Excel floats (.0), and fixes prefixes."""
+    if pd.isna(val) or str(val).lower() in ["nan", "none", ""]:
+        return ""
+    s = str(val).split(".")[0].strip()  # Strip trailing Excel float .0
+    digits = "".join(c for c in s if c.isdigit())
+    if not digits:
+        return ""
+    if digits.startswith("234") and len(digits) == 13:
+        digits = "0" + digits[3:]
+    elif len(digits) == 10 and digits.startswith(("7", "8", "9")):
+        digits = "0" + digits
+    return digits
+
+
+# 2. Tail Extractor for Infallible Matching
+def extract_tail(val, tail_len=7):
+    cleaned = clean_phone(val)
+    return cleaned[-tail_len:] if len(cleaned) >= tail_len else ""
+
+
+# 3. Network Matcher with Tail Lookup
+def sim_network(sim, airtel_tails_set):
+    sim_clean = clean_phone(sim)
+    if not sim_clean:
+        return "Missing"
+    
+    # Check if last 7 digits match the verified Airtel list
+    sim_tail = sim_clean[-7:] if len(sim_clean) >= 7 else ""
+    if sim_tail and sim_tail in airtel_tails_set:
+        return "Airtel (verified)"
+    
+    # Fallback to Nigerian telecom prefix lookup
+    prefix = sim_clean[:4]
+    return PREFIX_TO_NETWORK.get(prefix, "Unknown/Other (guessed)")
+
 # 3. Telecom Network Prefixes (Nigeria)
 NETWORK_PREFIXES = {
     "MTN": ["0803","0806","0703","0706","0813","0816","0810","0814","0903","0906","0913","0916","0704"],
