@@ -154,32 +154,35 @@ expired_total = df[df["days_to_expiry"] < 0]
 expiring_24h = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 1)]
 expiring_30d = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30)]
 
-active_vehicles = df[df["active"] == 1]
+active_vehicles = df[df["active"] == 1] if "active" in df.columns else df.head(0)
 active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
 
-df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers))
+df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers)) if "sim_number" in df.columns else "Missing"
 network_breakdown = df["sim_network"].value_counts()
 offline_by_network = df[df["hours_offline"] > 24]["sim_network"].value_counts()
 
-missing_sim = df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")]
-sim_counts = df["sim_number"].astype(str).value_counts()
+missing_sim = df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")] if "sim_number" in df.columns else df
+sim_counts = df["sim_number"].astype(str).value_counts() if "sim_number" in df.columns else pd.Series()
 duplicate_sims = sim_counts[sim_counts > 1].index.tolist()
 duplicate_sim_rows = df[
     df["sim_number"].astype(str).isin(duplicate_sims) & (df["sim_number"].astype(str) != "nan")
-]
+] if "sim_number" in df.columns else df.head(0)
 
 def valid_imei(v):
     v = str(v).replace(".00", "").strip()
     return v.isdigit() and len(v) == 15
 
-df["imei_clean"] = df["imei"].astype(str).str.replace(".00", "", regex=False).str.strip()
-invalid_imei = df[~df["imei"].apply(valid_imei)]
-imei_counts = df["imei_clean"].value_counts()
-duplicate_imeis = imei_counts[imei_counts > 1].index.tolist()
-duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imeis)]
+if "imei" in df.columns:
+    df["imei_clean"] = df["imei"].astype(str).str.replace(".00", "", regex=False).str.strip()
+    invalid_imei = df[~df["imei"].apply(valid_imei)]
+    imei_counts = df["imei_clean"].value_counts()
+    duplicate_imeis = imei_counts[imei_counts > 1].index.tolist()
+    duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imeis)]
+else:
+    invalid_imei = df.head(0)
+    duplicate_imei_rows = df.head(0)
 
-df["install_month"] = df["created_at"].dt.to_period("M").astype(str)
-install_trend = df.groupby("install_month").size()
+install_trend = df.groupby(df["created_at"].dt.to_period("M").astype(str)).size()
 
 renewal_opportunity = df[
     (df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) &
@@ -191,7 +194,7 @@ stats = {
     "reporting_24h": len(reporting_24h),
     "not_reporting": len(not_reporting),
     "expired_last_24h": len(expired_24h),
-    "expired_last_30d": len(expired_last_30d),
+    "expired_last_30d": len(expired_30d),  # Corrected variable name reference
     "expired_total": len(expired_total),
     "expiring_next_24h": len(expiring_24h),
     "expiring_next_30d": len(expiring_30d),
@@ -220,7 +223,7 @@ c6.metric("Expired (last 30d)", stats["expired_last_30d"])
 c7.metric("Expiring (next 24h)", stats["expiring_next_24h"])
 c8.metric("Expiring (next 30d)", stats["expiring_next_30d"])
 
-# --- NEW: BATCHED EXPIRATION BY YEAR & MONTH FILTER ---
+# --- EXPIRATION BY YEAR BATCHES & MONTH FILTER ---
 st.write("---")
 st.subheader("📅 Expiration Batches (2023 - 2027) & Monthly Filter")
 
@@ -245,7 +248,6 @@ with col_month:
         options=MONTH_OPTIONS
     )
 
-# Filter dataset by selected years and month
 filtered_batch_df = df[df["expiration_year"].isin(selected_years)].copy()
 if selected_month != "All Months":
     filtered_batch_df = filtered_batch_df[filtered_batch_df["expiration_month_name"] == selected_month]
@@ -254,7 +256,6 @@ st.write(
     f"Found **{len(filtered_batch_df):,} vehicles** matching the selected year and month criteria."
 )
 
-# Display Tabs for Each Year Batch
 if selected_years:
     year_tabs = st.tabs([f"📆 {yr}" for yr in sorted(selected_years)])
     for idx, yr in enumerate(sorted(selected_years)):
