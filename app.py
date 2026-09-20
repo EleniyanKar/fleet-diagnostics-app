@@ -145,6 +145,19 @@ if airtel_file is not None:
     else:
         st.error(f"Couldn't find an 'MSISDN' column in Airtel file. Found columns: {list(airtel_df.columns)}")
 
+# Process Airtel Verification File using Tail Matching
+airtel_numbers = set()
+if airtel_file is not None:
+    airtel_df = safe_read_file(airtel_file)
+    airtel_df.columns = airtel_df.columns.str.replace("\ufeff", "", regex=False).str.strip()
+    if "MSISDN" in airtel_df.columns:
+        # Extract last 7 digits of all verified Airtel lines
+        airtel_numbers = set(airtel_df["MSISDN"].apply(extract_tail))
+        airtel_numbers.discard("")
+        st.write(f"Loaded **{len(airtel_numbers):,} verified Airtel lines** for cross-reference.")
+    else:
+        st.error(f"Couldn't find an 'MSISDN' column in Airtel file. Found columns: {list(airtel_df.columns)}")
+
 
 # 6. Fleet Dataset Loading & Execution
 if uploaded_file is not None:
