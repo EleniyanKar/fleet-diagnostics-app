@@ -72,12 +72,15 @@ def extract_customer_emails(users_str):
 
 
 def safe_read_file(file_source):
-    """Reads CSV or Excel files with fallback encodings to avoid delimiter errors."""
+    """Reads CSV or Excel files while handling empty files gracefully."""
     filename = getattr(file_source, "name", str(file_source))
     if filename.endswith((".xlsx", ".xls")):
         return pd.read_excel(file_source)
     try:
         return pd.read_csv(file_source, encoding="utf-8-sig")
+    except pd.errors.EmptyDataError:
+        st.error(f"The file **{filename}** is empty. Please upload a valid report.")
+        st.stop()
     except Exception:
         try:
             return pd.read_csv(file_source, sep=None, engine="python", encoding="utf-8-sig")
@@ -89,8 +92,8 @@ def safe_read_file(file_source):
 uploaded_file = st.file_uploader("Upload new fleet report (Optional - overrides default dataset)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (Optional - for verified network identification)", type=["csv", "xlsx"])
 
-# Default dataset search (only picks valid non-empty files)
-DEFAULT_FILES = ["devices_report_1789914045.csv", "devices_report.csv"]
+# Search for valid non-empty default datasets
+DEFAULT_FILES = ["devices_report.csv.csv", "devices_report_1789914045.csv", "devices_report.csv"]
 default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.getsize(f) > 0), None)
 
 # Process Airtel Verification File
