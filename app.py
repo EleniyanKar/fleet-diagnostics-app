@@ -18,7 +18,7 @@ st.write(
     "Live fleet diagnostics, subscription renewal opportunities, and network analytics."
 )
 
-# 2. Administrative Email Exclusion List
+# 2. Administrative & Demo Email Exclusion List
 ADMIN_EMAILS = {
     "hello@cartracker.com.ng",
     "oluwafemi.a@cartracker.com",
@@ -37,6 +37,7 @@ ADMIN_EMAILS = {
     "dammylola@catracker.com.ng",
     "blessing@catracker.ng",
     "dammylola@catracker.ng",
+    "10device@cartracker.com.ng",  # Demo account filtered out
 }
 
 # 3. Telecom Network Prefixes (Nigeria)
@@ -123,7 +124,7 @@ def valid_imei(v):
 
 
 def extract_customer_emails(users_list_value):
-    """Regex extracts valid email strings and removes administrative accounts."""
+    """Regex extracts valid email strings and removes administrative & demo accounts."""
     if pd.isna(users_list_value) or str(users_list_value).strip() == "":
         return []
     found_emails = re.findall(
@@ -481,6 +482,7 @@ d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
 st.subheader("📈 Installation Trend")
 st.bar_chart(install_trend)
 
+# ----------------- REVISION 4: Added customer email to renewal table -----------------
 st.subheader("💰 Renewal Opportunity (active, reporting, expiring ≤30 days)")
 st.write(
     f"**{stats['renewal_opportunity_count']:,} vehicles** — easiest to renew since they're currently reporting."
@@ -490,6 +492,7 @@ renewal_cols = [
     "name",
     "plate_number",
     "sim_number",
+    "primary_email",  # Customer email included
     "expiration_date",
     "days_to_expiry",
 ]
@@ -500,9 +503,22 @@ st.download_button(
     renewal_opportunity.to_csv(index=False),
     "renewal_opportunity.csv",
     "text/csv",
+    key="dl_btn_renewal_table",
 )
 
+# ----------------- REVISION 3: Total count & download link added here -----------------
 st.subheader("📧 Renewal Opportunity - By Customer Email")
+st.write(
+    f"Total Renewal Opportunities: **{stats['renewal_opportunity_count']:,} vehicles**"
+)
+st.download_button(
+    "⬇️ Download Renewal Opportunity List (CSV)",
+    renewal_opportunity.to_csv(index=False),
+    "renewal_opportunity.csv",
+    "text/csv",
+    key="dl_btn_renewal_email_section",
+)
+
 renewal_with_email = renewal_opportunity.copy()
 has_email = renewal_with_email["primary_email"] != ""
 email_groups = renewal_with_email[has_email].groupby("primary_email")
@@ -553,6 +569,7 @@ st.download_button(
     "text/csv",
 )
 
+# ----------------- REVISION 2: Removed st.dataframe table to maximize screen -----------------
 st.subheader("⚠️ Expired Vehicles List (All Units)")
 expired_df = df[df["days_to_expiry"] < 0][
     [
@@ -571,12 +588,15 @@ expired_df = df[df["days_to_expiry"] < 0][
     ]
 ].sort_values("days_to_expiry")
 
-with_email_count = len(expired_df[expired_df["primary_email"] != ""]) if "primary_email" in expired_df.columns else 0
+with_email_count = (
+    len(expired_df[expired_df["primary_email"] != ""])
+    if "primary_email" in expired_df.columns
+    else 0
+)
 st.write(
     f"Found **{len(expired_df):,} total expired vehicles** "
     f"({with_email_count:,} have verified customer emails attached)."
 )
-st.dataframe(expired_df, use_container_width=True)
 st.download_button(
     "⬇️ Download Expired Vehicles List (CSV)",
     expired_df.to_csv(index=False),
@@ -613,7 +633,7 @@ if GEMINI_API_KEY:
             detail = a.get("detail", "")
             st.markdown(f"- **{task}**: {detail}")
     except Exception as e:
-        st.info(f"AI summary engine standby or API rate limit reached.")
+        st.info("AI summary engine standby or API rate limit reached.")
 
 # Interactive Q&A section
 st.subheader("❓ Ask a Question About This Fleet Data")
