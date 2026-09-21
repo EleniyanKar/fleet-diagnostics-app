@@ -78,34 +78,98 @@ PREFIX_TO_NETWORK = {
 
 
 # 4. Helper Functions
+# 1. Improved Normalize Function (Handles floats, scientific notation, and trailing .0)
 def normalize_number(n):
-  """Strip everything to a bare 10-digit number, regardless of spaces,
+    if pd.isna(n) or str(n).strip().lower() in ("", "nan", "null", "none"):
+        return ""
+    
+    # Convert to string and strip floating point suffixes from Pandas
+    s = str(n).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    elif s.endswith(".00"):
+        s = s[:-3]
+        
+    # Extract only digit characters
+    digits = "".join(ch for ch in s if ch.isdigit())
+    
+    # Trim Nigerian country codes & leading zeros
+    if digits.startswith("234"):
+        digits = digits[3:]
+    if digits.startswith("0"):
+        digits = digits[1:]
+        
+    # Ensure standard 10-digit bare number format (e.g., 8021234567)
+    if len(digits) > 10:
+        digits = digits[-10:]
+        
+    return digits
 
-  leading zero, or 234 country code, so numbers compare consistently
-  no matter which format the source file used.
-  """
-  digits = "".join(ch for ch in str(n) if ch.isdigit())
-  if digits.startswith("234"):
-    digits = digits[3:]
-  if digits.startswith("0"):
-    digits = digits[1:]
-  if len(digits) > 10:
-    digits = digits[-10:]
-  return digits
+
+# 2. Expanded Airtel Prefixes
+NETWORK_PREFIXES = {
+    "MTN": [
+        "0803", "0806", "0703", "0706", "0813", "0816", "0810", "0814",
+        "0903", "0906", "0913", "0916", "0704"
+    ],
+    "Airtel": [
+        "0802", "0808", "0708", "0812", "0701", "0902", "0901", "0904",
+        "0907", "0912", "0911", "0702"
+    ],
+    "Glo": ["0805", "0807", "0705", "0815", "0811", "0905", "0915"],
+    "9mobile": ["0809", "0817", "0818", "0908", "0909"],
+}
+PREFIX_TO_NETWORK = {
+    p: net for net, prefixes in NETWORK_PREFIXES.items() for p in prefixes
+}
 
 
 def sim_network(sim, airtel_set):
-  sim_norm = normalize_number(sim)
-  if not sim_norm or str(sim).strip().lower() in ("", "nan"):
-    return "Missing"
-  if sim_norm in airtel_set:
-    return "Airtel (verified)"
-  prefix = None
-  if len(sim_norm) >= 9:
-    prefix = "0" + sim_norm[:3]
-  if prefix and prefix in PREFIX_TO_NETWORK:
-    return PREFIX_TO_NETWORK[prefix]
-  return "Unknown/Other (guessed)"
+    sim_norm = normalize_number(sim)
+    if not sim_norm:
+        return "Missing"
+    
+    # Priority 1: Match against verified uploaded Airtel list
+    if sim_norm in airtel_set:
+        return "Airtel (verified)"
+    
+    # Priority 2: Fallback to prefix guessing
+    prefix = None
+    if len(sim_norm) >= 9:
+        prefix = "0" + sim_norm[:3]
+        
+    if prefix and prefix in PREFIX_TO_NETWORK:
+        net = PREFIX_TO_NETWORK[prefix]
+        return f"{net} (guessed)" if net != "Airtel" else "Airtel (guessed)"
+        
+    return "Unknown/Other (guessed)"
+
+
+# 3. Robust Airtel File Processor (Detects MSISDN, Phone, SIM, or Mobile columns)
+airtel_numbers = set()
+if airtel_file is not None:
+    airtel_df = safe_read_file(airtel_file)
+    airtel_df.columns = (
+        airtel_df.columns.astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+    )
+    
+    # Flexible column search for MSISDN variants
+    msisdn_col = next(
+        (col for col in airtel_df.columns if col.lower() in [
+            "msisdn", "phone", "phone number", "phonenumber", "sim", "sim number", "sim_number", "mobile"
+        ]),
+        None
+    )
+    
+    if not msisdn_col:
+        st.error(f"Couldn't find an 'MSISDN' or phone column. Found these instead: {list(airtel_df.columns)}")
+    else:
+        # Convert all entries to normalized strings
+        airtel_numbers = set(airtel_df[msisdn_col].apply(normalize_number))
+        airtel_numbers.discard("")
+        st.success(f"Loaded **{len(airtel_numbers):,} verified Airtel numbers** from column '{msisdn_col}'.")
 
 
 def valid_imei(v):
