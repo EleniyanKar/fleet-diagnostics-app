@@ -78,39 +78,39 @@ PREFIX_TO_NETWORK = {
 
 
 # 4. Helper Functions
-def clean_phone(val):
-  """Standardizes Nigerian MSISDNs, strips Excel .0 floats, spaces, and country codes."""
-  if pd.isna(val) or str(val).lower() in ["nan", "none", ""]:
-    return ""
-  s = str(val).split(".")[0].strip()
-  digits = "".join(c for c in s if c.isdigit())
-  if not digits:
-    return ""
-  if digits.startswith("234") and len(digits) == 13:
-    digits = "0" + digits[3:]
-  elif len(digits) == 10 and digits.startswith(("7", "8", "9")):
-    digits = "0" + digits
+def normalize_number(n):
+  """Strip everything to a bare 10-digit number, regardless of spaces,
+
+  leading zero, or 234 country code, so numbers compare consistently
+  no matter which format the source file used.
+  """
+  digits = "".join(ch for ch in str(n) if ch.isdigit())
+  if digits.startswith("234"):
+    digits = digits[3:]
+  if digits.startswith("0"):
+    digits = digits[1:]
+  if len(digits) > 10:
+    digits = digits[-10:]
   return digits
 
 
-def extract_tail(val, tail_len=7):
-  """Extracts last N digits for reliable cross-dataset matching."""
-  cleaned = clean_phone(val)
-  return cleaned[-tail_len:] if len(cleaned) >= tail_len else ""
-
-
-def sim_network(sim, airtel_tails_set):
-  """Categorizes SIM by tail matching against Airtel list or prefix dictionary."""
-  sim_clean = clean_phone(sim)
-  if not sim_clean:
+def sim_network(sim, airtel_set):
+  sim_norm = normalize_number(sim)
+  if not sim_norm or str(sim).strip().lower() in ("", "nan"):
     return "Missing"
-
-  sim_tail = sim_clean[-7:] if len(sim_clean) >= 7 else ""
-  if sim_tail and sim_tail in airtel_tails_set:
+  if sim_norm in airtel_set:
     return "Airtel (verified)"
+  prefix = None
+  if len(sim_norm) >= 9:
+    prefix = "0" + sim_norm[:3]
+  if prefix and prefix in PREFIX_TO_NETWORK:
+    return PREFIX_TO_NETWORK[prefix]
+  return "Unknown/Other (guessed)"
 
-  prefix = sim_clean[:4]
-  return PREFIX_TO_NETWORK.get(prefix, "Unknown/Other")
+
+def valid_imei(v):
+  v = str(v).replace(".00", "").strip()
+  return v.isdigit() and len(v) == 15
 
 
 def extract_customer_emails(users_list_value):
@@ -125,11 +125,6 @@ def extract_customer_emails(users_list_value):
       for e in found_emails
       if e.strip().lower() not in ADMIN_EMAILS
   ]
-
-
-def valid_imei(v):
-  v = str(v).replace(".00", "").strip()
-  return v.isdigit() and len(v) == 15
 
 
 def safe_read_file(file_source):
@@ -151,11 +146,16 @@ def safe_read_file(file_source):
       return pd.read_csv(file_source, encoding="latin1")
 
 
-# 5. UI File Uploaders & Automatic Selection
-uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
-airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
+# 5. UI File Uploaders & Selection
+uploaded_file = st.file_uploader(
+    "Choose your fleet CSV file", type=["csv", "xlsx", "xls"]
+)
+airtel_file = st.file_uploader(
+    "Upload Airtel SIM list (optional, for accurate network ID)",
+    type=["csv", "xlsx"],
+)
 
-# Search for default repository files if no new file is uploaded
+# Default dataset fallback search
 DEFAULT_FILES = [
     "devices_report.csv.csv",
     "devices_report_1789914045.csv",
@@ -166,8 +166,8 @@ default_path = next(
     None,
 )
 
-# Process Airtel Verification File using Tail Matching
-airtel_tails = set()
+# Process Airtel Verification File using normalize_number
+airtel_numbers = set()
 if airtel_file is not None:
   airtel_df = safe_read_file(airtel_file)
   airtel_df.columns = (
@@ -176,25 +176,18 @@ if airtel_file is not None:
       .str.strip()
   )
 
-  # Flexible column search for Phone/SIM/Line headers
-  msisdn_col = next(
-      (
-          c
-          for c in airtel_df.columns
-          if any(
-              k in c.lower()
-              for k in ["msisdn", "phone", "sim", "line", "number", "mobile"]
-          )
-      ),
-      airtel_df.columns[0],
-  )
-
-  if msisdn_col:
-    airtel_tails = set(airtel_df[msisdn_col].apply(extract_tail))
-    airtel_tails.discard("")
+  if "MSISDN" not in airtel_df.columns:
+    st.error(
+        "Couldn't find an 'MSISDN' column. Found these instead: "
+        + str(list(airtel_df.columns))
+    )
+  else:
+    airtel_numbers = set(airtel_df["MSISDN"].apply(normalize_number))
+    airtel_numbers.discard("")
     st.write(
-        f"Loaded **{len(airtel_tails):,} verified Airtel lines** for"
-        " cross-reference."
+        "Loaded "
+        + str(len(airtel_numbers))
+        + " Airtel numbers for cross-reference."
     )
 
 
@@ -253,9 +246,14 @@ active_vehicles = (
 )
 active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
 
-# Network Categorization using Tail Matching
+# Network Categorization
+df["sim_number_norm"] = (
+    df["sim_number"].apply(normalize_number)
+    if "sim_number" in df.columns
+    else ""
+)
 df["sim_network"] = (
-    df["sim_number"].apply(lambda x: sim_network(x, airtel_tails))
+    df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers))
     if "sim_number" in df.columns
     else "Missing"
 )
@@ -326,7 +324,6 @@ stats = {
     "network_breakdown": network_breakdown.to_dict(),
 }
 
-# Store stats in session state for Q&A persistence
 st.session_state["last_stats"] = stats
 
 # 8. Render Operational Dashboard UI
@@ -555,9 +552,7 @@ if GEMINI_API_KEY:
     response = client.models.generate_content(
         model="gemini-3.6-flash", contents=prompt
     )
-    raw = (
-        response.text.strip().strip("`").replace("json", "", 1).strip()
-    )
+    raw = response.text.strip().strip("`").replace("json", "", 1).strip()
     result = json.loads(raw)
 
     st.subheader("📋 AI Executive Summary")
