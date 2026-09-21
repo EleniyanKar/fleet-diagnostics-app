@@ -37,7 +37,7 @@ ADMIN_EMAILS = {
     "dammylola@catracker.com.ng",
     "blessing@catracker.ng",
     "dammylola@catracker.ng",
-    "10device@cartracker.com.ng",  # Demo account filtered out
+    "10device@cartracker.com.ng",
 }
 
 # 3. Telecom Network Prefixes (Nigeria)
@@ -149,14 +149,21 @@ def safe_read_file(file_source):
         st.stop()
     except Exception:
         try:
-            return pd.read_csv(file_source, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
+            return pd.read_csv(
+                file_source,
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+                dtype=str,
+            )
         except Exception:
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
 
 
 # 5. UI File Uploaders & Automatic Selection
 uploaded_file = st.file_uploader(
-    "Upload new fleet report (Optional - overrides default dataset)", type=["csv", "xlsx", "xls"]
+    "Upload new fleet report (Optional - overrides default dataset)",
+    type=["csv", "xlsx", "xls"],
 )
 airtel_file = st.file_uploader(
     "Upload Airtel SIM list (Optional - for accurate network verification)",
@@ -188,7 +195,8 @@ if airtel_file is not None:
         (
             col
             for col in airtel_df.columns
-            if col.lower() in [
+            if col.lower()
+            in [
                 "msisdn",
                 "phone",
                 "phone number",
@@ -236,7 +244,9 @@ st.write(f"Analyzing **{len(df):,} total fleet records**")
 
 # Data Processing
 df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
+df["last_connect_time"] = pd.to_datetime(
+    df["last_connect_time"], errors="coerce"
+)
 df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
 df["expiration_year"] = df["expiration_date"].dt.year
@@ -272,10 +282,12 @@ active_vehicles = (
 )
 active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
 
-# Network Categorization using normalize_number
+# Network Categorization
 if "sim_number" in df.columns:
     df["sim_number_norm"] = df["sim_number"].apply(normalize_number)
-    df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers))
+    df["sim_network"] = df["sim_number"].apply(
+        lambda x: sim_network(x, airtel_numbers)
+    )
 else:
     df["sim_number_norm"] = ""
     df["sim_network"] = "Missing"
@@ -414,7 +426,9 @@ if selected_years:
             yr_df = filtered_batch_df[
                 filtered_batch_df["expiration_year"] == yr
             ].sort_values("expiration_date")
-            st.metric(f"Vehicles Expiring/Expired in {yr}", f"{len(yr_df):,} units")
+            st.metric(
+                f"Vehicles Expiring/Expired in {yr}", f"{len(yr_df):,} units"
+            )
 
             if not yr_df.empty:
                 display_cols = [
@@ -454,7 +468,14 @@ all_airtel_df = df[
 total_airtel_count = len(all_airtel_df)
 
 airtel_offline_48h = all_airtel_df[all_airtel_df["hours_offline"] >= 48][
-    ["id", "name", "plate_number", "sim_number", "last_connect_time", "hours_offline"]
+    [
+        "id",
+        "name",
+        "plate_number",
+        "sim_number",
+        "last_connect_time",
+        "hours_offline",
+    ]
 ].sort_values("hours_offline", ascending=False)
 
 m1, m2 = st.columns(2)
@@ -482,7 +503,7 @@ d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
 st.subheader("📈 Installation Trend")
 st.bar_chart(install_trend)
 
-# ----------------- REVISION 4: Added customer email to renewal table -----------------
+# Renewal Opportunity Table
 st.subheader("💰 Renewal Opportunity (active, reporting, expiring ≤30 days)")
 st.write(
     f"**{stats['renewal_opportunity_count']:,} vehicles** — easiest to renew since they're currently reporting."
@@ -492,11 +513,13 @@ renewal_cols = [
     "name",
     "plate_number",
     "sim_number",
-    "primary_email",  # Customer email included
+    "primary_email",
     "expiration_date",
     "days_to_expiry",
 ]
-available_renewal = [c for c in renewal_cols if c in renewal_opportunity.columns]
+available_renewal = [
+    c for c in renewal_cols if c in renewal_opportunity.columns
+]
 st.dataframe(renewal_opportunity[available_renewal], use_container_width=True)
 st.download_button(
     "⬇️ Download Renewal Opportunity List (CSV)",
@@ -506,13 +529,13 @@ st.download_button(
     key="dl_btn_renewal_table",
 )
 
-# ----------------- REVISION 3: Total count & download link added here -----------------
+# Renewal Opportunity - Limited to Top 10 Accounts
 st.subheader("📧 Renewal Opportunity - By Customer Email")
 st.write(
     f"Total Renewal Opportunities: **{stats['renewal_opportunity_count']:,} vehicles**"
 )
 st.download_button(
-    "⬇️ Download Renewal Opportunity List (CSV)",
+    "⬇️ Download Full Renewal Opportunity List (CSV)",
     renewal_opportunity.to_csv(index=False),
     "renewal_opportunity.csv",
     "text/csv",
@@ -523,7 +546,17 @@ renewal_with_email = renewal_opportunity.copy()
 has_email = renewal_with_email["primary_email"] != ""
 email_groups = renewal_with_email[has_email].groupby("primary_email")
 
-for email, group in email_groups:
+# Sort customer email groups by vehicle count descending and limit to top 10
+sorted_email_groups = sorted(
+    email_groups, key=lambda x: len(x[1]), reverse=True
+)
+top_10_email_groups = sorted_email_groups[:10]
+
+st.write(
+    f"Showing top **{len(top_10_email_groups)}** customer account(s) with the highest number of expiring vehicles (out of {len(sorted_email_groups)} total accounts):"
+)
+
+for email, group in top_10_email_groups:
     label = f"{email} - {len(group)} vehicle(s) expiring soon"
     with st.expander(label):
         group_cols = [
@@ -544,9 +577,7 @@ for email, group in email_groups:
             + vehicle_list.replace(" ", "%20")
             + ".%0A%0APlease renew to avoid service interruption."
         )
-        mailto_link = (
-            f"mailto:{email}?subject=Vehicle%20Subscription%20Renewal%20Reminder&body={body_text}"
-        )
+        mailto_link = f"mailto:{email}?subject=Vehicle%20Subscription%20Renewal%20Reminder&body={body_text}"
         st.markdown(f"[Send renewal email]({mailto_link})")
 
 st.subheader("📥 Download Customer Contact List")
@@ -569,7 +600,7 @@ st.download_button(
     "text/csv",
 )
 
-# ----------------- REVISION 2: Removed st.dataframe table to maximize screen -----------------
+# Expired Vehicles Section
 st.subheader("⚠️ Expired Vehicles List (All Units)")
 expired_df = df[df["days_to_expiry"] < 0][
     [
