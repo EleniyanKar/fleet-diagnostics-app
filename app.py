@@ -20,6 +20,7 @@ st.write(
 
 # 2. Administrative & Demo Email Exclusion List
 ADMIN_EMAILS = {
+    # Original admin emails
     "hello@cartracker.com.ng",
     "oluwafemi.a@cartracker.com",
     "ayo.a@cartracker.com",
@@ -38,6 +39,22 @@ ADMIN_EMAILS = {
     "blessing@catracker.ng",
     "dammylola@catracker.ng",
     "10device@cartracker.com.ng",
+    # Specific excluded emails requested
+    "joyvivian111@gmail.com",
+    "ehonreoluwaseun@icloud.com",
+    "obinnaezenwa@gmail.com",
+    "frankcay12345@yahoo.com",
+    "access@hopmobiletransport.com",
+    "adadioma@gmail.com",
+    "balogunisiaka38@gmail.com",
+    "gbaguje@yahoo.com",
+    "akeemakinwale26@gmail.com",
+    "rhemzy82@gmail.com",
+    "muibihammedaliu@gmail.com",
+    "faruqafolabi05@gmail.com",
+    "chuklexy@gmail.com",
+    "uokigbo@gmail.com",
+    "ballingtonlogistics@gmail.com",
 }
 
 # 3. Telecom Network Prefixes (Nigeria)
