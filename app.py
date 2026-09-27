@@ -64,12 +64,16 @@ EXCLUDED_EMAILS = {
     "ballingtonlogistics@gmail.com",
 }
 
-# Substring / Keyword exclusions (case-insensitive)
+# Substring / Keyword / Domain exclusions (case-insensitive)
+# ANY email containing any of these strings will be dropped immediately.
 EXCLUDED_KEYWORDS = [
-    "hopmobiletransport.com",
+    "cartracker",
+    "catracker",
     "clicktgi",
     "gbovo",
+    "hopmobiletransport.com",
 ]
+
 
 # ==========================================
 # 3. Telecom Network Prefixes (Nigeria)
@@ -136,13 +140,18 @@ def valid_imei(v):
 
 
 def is_excluded_email(email_str):
-    """Checks whether an email matches exact exclusions or keyword filters."""
+    """Strictly checks whether an email matches exact exclusions or contains any blacklisted keyword/domain substring."""
     e = str(email_str).strip().lower()
+
+    # Exact match check
     if e in EXCLUDED_EMAILS:
         return True
-    for kw in EXCLUDED_KEYWORDS:
-        if kw in e:
+
+    # Keyword / Substring check (covers cartracker, catracker, clicktgi, gbovo, hopmobiletransport.com)
+    for keyword in EXCLUDED_KEYWORDS:
+        if keyword in e:
             return True
+
     return False
 
 
@@ -162,7 +171,7 @@ def extract_customer_emails(users_list_value):
 
 
 def extract_clean_unique_emails(dataframe):
-    """Extracts all clean customer emails into a single-column DataFrame (1 per row)."""
+    """Parses all user columns, strips excluded/blacklisted emails, and outputs 1 unique clean email per row."""
     all_extracted_emails = set()
     target_columns = [
         col for col in ["users_list", "user_emails", "primary_email"] if col in dataframe.columns
@@ -395,27 +404,31 @@ st.session_state["last_stats"] = stats
 
 
 # ==========================================
-# 8. Sidebar Clean Email Exporter
-# ==========================================
-st.sidebar.markdown("---")
-st.sidebar.subheader("📥 Export Email Lists")
-
-clean_emails_df = extract_clean_unique_emails(df)
-st.sidebar.write(f"Total Unique Clean Emails: **{len(clean_emails_df):,}**")
-
-st.sidebar.download_button(
-    label="⬇️ Download Clean Email List (CSV)",
-    data=clean_emails_df.to_csv(index=False).encode("utf-8"),
-    file_name="deduplicated_customer_emails.csv",
-    mime="text/csv",
-    help="Downloads a clean 1-column CSV containing all unique customer emails excluding internal and blacklisted addresses.",
-)
-
-
-# ==========================================
-# 9. Operational Dashboard UI Rendering
+# 8. Operational Dashboard UI Rendering
 # ==========================================
 st.success("Analysis Complete!")
+
+# --- Prominent Top Download Banner ---
+st.info("📧 **Customer Email Campaign Exporter**")
+clean_emails_df = extract_clean_unique_emails(df)
+
+banner_col1, banner_col2 = st.columns([2, 1])
+with banner_col1:
+    st.write(
+        f"Total Unique Clean Customer Emails: **{len(clean_emails_df):,}** "
+        f"*(Strictly excludes duplicates, internal `@cartracker` / `@catracker` domains, blacklisted emails, and `clicktgi`/`gbovo`/`hopmobiletransport.com` matches)*"
+    )
+with banner_col2:
+    st.download_button(
+        label="⬇️ Download Clean Unique Emails (CSV)",
+        data=clean_emails_df.to_csv(index=False).encode("utf-8"),
+        file_name="deduplicated_customer_emails.csv",
+        mime="text/csv",
+        help="Downloads a 1-column CSV file containing all clean unique customer emails (one email per row).",
+        use_container_width=True,
+    )
+
+st.write("---")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Reporting (24h)", f"{stats['reporting_24h']:,}")
@@ -545,13 +558,6 @@ st.subheader("📧 Renewal Opportunity - By Customer Email")
 st.write(
     f"Total Renewal Opportunities: **{stats['renewal_opportunity_count']:,} vehicles**"
 )
-st.download_button(
-    "⬇️ Download Full Renewal Opportunity List (CSV)",
-    renewal_opportunity.to_csv(index=False),
-    "renewal_opportunity.csv",
-    "text/csv",
-    key="dl_btn_renewal_email_section",
-)
 
 renewal_with_email = renewal_opportunity.copy()
 has_email = renewal_with_email["primary_email"] != ""
@@ -610,7 +616,7 @@ st.download_button(
 )
 
 # ==========================================
-# 10. AI Assessment & Q&A
+# 9. AI Assessment & Q&A
 # ==========================================
 st.write("---")
 if GEMINI_API_KEY:
