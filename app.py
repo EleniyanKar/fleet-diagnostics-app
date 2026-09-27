@@ -2,25 +2,32 @@ import json
 import os
 import re
 import pandas as pd
+
 from dotenv import load_dotenv
 from google import genai
 import streamlit as st
 
+# ==========================================
 # 1. Page Configuration & Environment Setup
+# ==========================================
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 st.set_page_config(
-    page_title="AI Fleet Diagnostics Dashboard", page_icon="⚡", layout="wide"
+    page_title="AI Fleet Diagnostics Dashboard",
+    page_icon="⚡",
+    layout="wide",
 )
 st.title("⚡ AI Fleet Diagnostics Dashboard")
 st.write(
     "Live fleet diagnostics, subscription renewal opportunities, and network analytics."
 )
 
-# 2. Administrative & Demo Email Exclusion List
-ADMIN_EMAILS = {
-    # Original admin emails
+# ==========================================
+# 2. Administrative & Excluded Email Setup
+# ==========================================
+EXCLUDED_EMAILS = {
+    # Internal Admin Accounts
     "hello@cartracker.com.ng",
     "oluwafemi.a@cartracker.com",
     "ayo.a@cartracker.com",
@@ -39,7 +46,7 @@ ADMIN_EMAILS = {
     "blessing@catracker.ng",
     "dammylola@catracker.ng",
     "10device@cartracker.com.ng",
-    # Specific excluded emails requested
+    # Blacklisted Customer Accounts
     "joyvivian111@gmail.com",
     "ehonreoluwaseun@icloud.com",
     "obinnaezenwa@gmail.com",
@@ -57,36 +64,24 @@ ADMIN_EMAILS = {
     "ballingtonlogistics@gmail.com",
 }
 
+# Substring / Keyword exclusions (case-insensitive)
+EXCLUDED_KEYWORDS = [
+    "hopmobiletransport.com",
+    "clicktgi",
+    "gbovo",
+]
+
+# ==========================================
 # 3. Telecom Network Prefixes (Nigeria)
+# ==========================================
 NETWORK_PREFIXES = {
     "MTN": [
-        "0803",
-        "0806",
-        "0703",
-        "0706",
-        "0813",
-        "0816",
-        "0810",
-        "0814",
-        "0903",
-        "0906",
-        "0913",
-        "0916",
-        "0704",
+        "0803", "0806", "0703", "0706", "0813", "0816", "0810",
+        "0814", "0903", "0906", "0913", "0916", "0704",
     ],
     "Airtel": [
-        "0802",
-        "0808",
-        "0708",
-        "0812",
-        "0701",
-        "0902",
-        "0901",
-        "0904",
-        "0907",
-        "0912",
-        "0911",
-        "0702",
+        "0802", "0808", "0708", "0812", "0701", "0902", "0901",
+        "0904", "0907", "0912", "0911", "0702",
     ],
     "Glo": ["0805", "0807", "0705", "0815", "0811", "0905", "0915"],
     "9mobile": ["0809", "0817", "0818", "0908", "0909"],
@@ -96,11 +91,11 @@ PREFIX_TO_NETWORK = {
 }
 
 
-# 4. Helper Functions
+# ==========================================
+# 4. Helper & Data Parsing Functions
+# ==========================================
 def normalize_number(n):
-    """Strips everything to a bare 10-digit number, regardless of spaces,
-    leading zeros, country codes, or Excel float .0 artifacts.
-    """
+    """Normalizes phone numbers to a standardized 10-digit format."""
     if pd.isna(n) or str(n).strip().lower() in ("", "nan", "null", "none"):
         return ""
 
@@ -121,7 +116,7 @@ def normalize_number(n):
 
 
 def sim_network(sim, airtel_set):
-    """Categorizes SIM by matching against verified Airtel list or prefix dictionary."""
+    """Categorizes SIM using verified Airtel numbers or prefix matching."""
     sim_norm = normalize_number(sim)
     if not sim_norm or str(sim).strip().lower() in ("", "nan", "none"):
         return "Missing"
@@ -140,22 +135,57 @@ def valid_imei(v):
     return v.isdigit() and len(v) == 15
 
 
+def is_excluded_email(email_str):
+    """Checks whether an email matches exact exclusions or keyword filters."""
+    e = str(email_str).strip().lower()
+    if e in EXCLUDED_EMAILS:
+        return True
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in e:
+            return True
+    return False
+
+
 def extract_customer_emails(users_list_value):
-    """Regex extracts valid email strings and removes administrative & demo accounts."""
+    """Extracts clean emails from string inputs, filtering out blacklisted items."""
     if pd.isna(users_list_value) or str(users_list_value).strip() == "":
         return []
     found_emails = re.findall(
         r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", str(users_list_value)
     )
-    return [
-        e.strip().lower()
-        for e in found_emails
-        if e.strip().lower() not in ADMIN_EMAILS
+    clean_emails = []
+    for email in found_emails:
+        e = email.strip().lower()
+        if not is_excluded_email(e):
+            clean_emails.append(e)
+    return clean_emails
+
+
+def extract_clean_unique_emails(dataframe):
+    """Extracts all clean customer emails into a single-column DataFrame (1 per row)."""
+    all_extracted_emails = set()
+    target_columns = [
+        col for col in ["users_list", "user_emails", "primary_email"] if col in dataframe.columns
     ]
+
+    for col in target_columns:
+        for val in dataframe[col].dropna():
+            found = re.findall(
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", str(val)
+            )
+            for email in found:
+                e = email.strip().lower()
+                if not is_excluded_email(e):
+                    all_extracted_emails.add(e)
+
+    clean_email_df = pd.DataFrame(
+        sorted(list(all_extracted_emails)), columns=["Customer Email"]
+    )
+    return clean_email_df
 
 
 def safe_read_file(file_source):
-    """Reads CSV or Excel files cleanly while handling encodings and empty file checks."""
+    """Safely reads CSV or Excel files with fallback encodings."""
     filename = getattr(file_source, "name", str(file_source))
     if filename.endswith((".xlsx", ".xls")):
         return pd.read_excel(file_source)
@@ -167,17 +197,15 @@ def safe_read_file(file_source):
     except Exception:
         try:
             return pd.read_csv(
-                file_source,
-                sep=None,
-                engine="python",
-                encoding="utf-8-sig",
-                dtype=str,
+                file_source, sep=None, engine="python", encoding="utf-8-sig", dtype=str
             )
         except Exception:
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
 
 
-# 5. UI File Uploaders & Automatic Selection
+# ==========================================
+# 5. UI File Uploaders & File Loading
+# ==========================================
 uploaded_file = st.file_uploader(
     "Upload new fleet report (Optional - overrides default dataset)",
     type=["csv", "xlsx", "xls"],
@@ -187,7 +215,6 @@ airtel_file = st.file_uploader(
     type=["csv", "xlsx"],
 )
 
-# Search for default repository files if no new file is uploaded
 DEFAULT_FILES = [
     "devices_report.csv.csv",
     "devices_report_1789914045.csv",
@@ -198,7 +225,6 @@ default_path = next(
     None,
 )
 
-# Process Airtel Verification File using normalize_number
 airtel_numbers = set()
 if airtel_file is not None:
     airtel_df = safe_read_file(airtel_file)
@@ -210,19 +236,10 @@ if airtel_file is not None:
 
     msisdn_col = next(
         (
-            col
-            for col in airtel_df.columns
-            if col.lower()
-            in [
-                "msisdn",
-                "phone",
-                "phone number",
-                "phonenumber",
-                "sim",
-                "sim number",
-                "sim_number",
-                "mobile",
-                "line",
+            col for col in airtel_df.columns
+            if col.lower() in [
+                "msisdn", "phone", "phone number", "phonenumber", "sim",
+                "sim number", "sim_number", "mobile", "line",
             ]
         ),
         None,
@@ -230,18 +247,20 @@ if airtel_file is not None:
 
     if not msisdn_col:
         st.error(
-            "Couldn't find an 'MSISDN' or phone column in Airtel file. Found these instead: "
+            "Couldn't find an 'MSISDN' or phone column in Airtel file. Found columns: "
             + str(list(airtel_df.columns))
         )
     else:
         airtel_numbers = set(airtel_df[msisdn_col].apply(normalize_number))
         airtel_numbers.discard("")
         st.write(
-            f"Loaded **{len(airtel_numbers):,} Airtel numbers** from column `{msisdn_col}` for cross-reference."
+            f"Loaded **{len(airtel_numbers):,} Airtel numbers** for cross-reference."
         )
 
 
-# 6. Fleet Dataset Loading & Execution
+# ==========================================
+# 6. Fleet Dataset Loading & Processing
+# ==========================================
 if uploaded_file is not None:
     df = safe_read_file(uploaded_file)
     st.info(f"Loaded uploaded file: **{uploaded_file.name}**")
@@ -259,11 +278,9 @@ df.columns = (
 )
 st.write(f"Analyzing **{len(df):,} total fleet records**")
 
-# Data Processing
+# Convert Timestamps
 df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-df["last_connect_time"] = pd.to_datetime(
-    df["last_connect_time"], errors="coerce"
-)
+df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
 df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
 df["expiration_year"] = df["expiration_date"].dt.year
@@ -281,7 +298,9 @@ if "users_list" in df.columns:
 else:
     df["primary_email"] = ""
 
+# ==========================================
 # 7. Diagnostic Analytics Computation
+# ==========================================
 reporting_24h = df[df["hours_offline"] <= 24]
 not_reporting = df[df["hours_offline"] > 24]
 
@@ -299,7 +318,6 @@ active_vehicles = (
 )
 active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
 
-# Network Categorization
 if "sim_number" in df.columns:
     df["sim_number_norm"] = df["sim_number"].apply(normalize_number)
     df["sim_network"] = df["sim_number"].apply(
@@ -313,10 +331,7 @@ network_breakdown = df["sim_network"].value_counts()
 offline_by_network = df[df["hours_offline"] > 24]["sim_network"].value_counts()
 
 missing_sim = (
-    df[
-        df["sim_number"].isna()
-        | (df["sim_number"].astype(str).str.strip() == "")
-    ]
+    df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")]
     if "sim_number" in df.columns
     else df
 )
@@ -378,7 +393,28 @@ stats = {
 
 st.session_state["last_stats"] = stats
 
-# 8. Render Operational Dashboard UI
+
+# ==========================================
+# 8. Sidebar Clean Email Exporter
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("📥 Export Email Lists")
+
+clean_emails_df = extract_clean_unique_emails(df)
+st.sidebar.write(f"Total Unique Clean Emails: **{len(clean_emails_df):,}**")
+
+st.sidebar.download_button(
+    label="⬇️ Download Clean Email List (CSV)",
+    data=clean_emails_df.to_csv(index=False).encode("utf-8"),
+    file_name="deduplicated_customer_emails.csv",
+    mime="text/csv",
+    help="Downloads a clean 1-column CSV containing all unique customer emails excluding internal and blacklisted addresses.",
+)
+
+
+# ==========================================
+# 9. Operational Dashboard UI Rendering
+# ==========================================
 st.success("Analysis Complete!")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -393,38 +429,23 @@ c6.metric("Expired (last 30d)", stats["expired_last_30d"])
 c7.metric("Expiring (next 24h)", stats["expiring_next_24h"])
 c8.metric("Expiring (next 30d)", stats["expiring_next_30d"])
 
-# --- EXPIRATION BY YEAR BATCHES & MONTH FILTER ---
+# --- Expiration Batches & Filter ---
 st.write("---")
 st.subheader("📅 Expiration Batches (2023 - 2027) & Monthly Filter")
 
 TARGET_YEARS = [2023, 2024, 2025, 2026, 2027]
 MONTH_OPTIONS = [
-    "All Months",
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
+    "All Months", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
 ]
 
 col_years, col_month = st.columns([2, 1])
 with col_years:
     selected_years = st.multiselect(
-        "Select Expiration Year Batches:",
-        options=TARGET_YEARS,
-        default=TARGET_YEARS,
+        "Select Expiration Year Batches:", options=TARGET_YEARS, default=TARGET_YEARS
     )
 with col_month:
-    selected_month = st.selectbox(
-        "Filter by Expiration Month:", options=MONTH_OPTIONS
-    )
+    selected_month = st.selectbox("Filter by Expiration Month:", options=MONTH_OPTIONS)
 
 filtered_batch_df = df[df["expiration_year"].isin(selected_years)].copy()
 if selected_month != "All Months":
@@ -443,19 +464,12 @@ if selected_years:
             yr_df = filtered_batch_df[
                 filtered_batch_df["expiration_year"] == yr
             ].sort_values("expiration_date")
-            st.metric(
-                f"Vehicles Expiring/Expired in {yr}", f"{len(yr_df):,} units"
-            )
+            st.metric(f"Vehicles Expiring/Expired in {yr}", f"{len(yr_df):,} units")
 
             if not yr_df.empty:
                 display_cols = [
-                    "id",
-                    "name",
-                    "plate_number",
-                    "sim_number",
-                    "primary_email",
-                    "expiration_date",
-                    "days_to_expiry",
+                    "id", "name", "plate_number", "sim_number",
+                    "primary_email", "expiration_date", "days_to_expiry",
                 ]
                 available_cols = [c for c in display_cols if c in yr_df.columns]
                 st.dataframe(yr_df[available_cols], use_container_width=True)
@@ -470,8 +484,8 @@ if selected_years:
                 st.info(
                     f"No vehicles found expiring in {yr} for the selected month ({selected_month})."
                 )
-st.write("---")
 
+st.write("---")
 st.subheader("📡 Network Breakdown (SIM)")
 st.bar_chart(network_breakdown)
 
@@ -479,29 +493,17 @@ st.subheader("📵 Offline Devices by Network")
 st.bar_chart(offline_by_network)
 
 st.subheader("📵 Airtel SIM Network Analysis")
-all_airtel_df = df[
-    df["sim_network"].str.contains("Airtel", case=False, na=False)
-]
+all_airtel_df = df[df["sim_network"].str.contains("Airtel", case=False, na=False)]
 total_airtel_count = len(all_airtel_df)
 
 airtel_offline_48h = all_airtel_df[all_airtel_df["hours_offline"] >= 48][
-    [
-        "id",
-        "name",
-        "plate_number",
-        "sim_number",
-        "last_connect_time",
-        "hours_offline",
-    ]
+    ["id", "name", "plate_number", "sim_number", "last_connect_time", "hours_offline"]
 ].sort_values("hours_offline", ascending=False)
 
 m1, m2 = st.columns(2)
 m1.metric("Total Airtel SIMs in Fleet", f"{total_airtel_count:,}")
 m2.metric("Airtel SIMs Offline 48h+", f"{len(airtel_offline_48h):,}")
 
-st.write(
-    f"Showing **{len(airtel_offline_48h):,} Airtel SIMs** that have not reported in 48+ hours:"
-)
 st.dataframe(airtel_offline_48h, use_container_width=True)
 st.download_button(
     "⬇️ Download Airtel Offline 48h+ List (CSV)",
@@ -520,23 +522,16 @@ d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
 st.subheader("📈 Installation Trend")
 st.bar_chart(install_trend)
 
-# Renewal Opportunity Table
+# --- Renewal Opportunities Section ---
 st.subheader("💰 Renewal Opportunity (active, reporting, expiring ≤30 days)")
 st.write(
     f"**{stats['renewal_opportunity_count']:,} vehicles** — easiest to renew since they're currently reporting."
 )
 renewal_cols = [
-    "id",
-    "name",
-    "plate_number",
-    "sim_number",
-    "primary_email",
-    "expiration_date",
-    "days_to_expiry",
+    "id", "name", "plate_number", "sim_number",
+    "primary_email", "expiration_date", "days_to_expiry",
 ]
-available_renewal = [
-    c for c in renewal_cols if c in renewal_opportunity.columns
-]
+available_renewal = [c for c in renewal_cols if c in renewal_opportunity.columns]
 st.dataframe(renewal_opportunity[available_renewal], use_container_width=True)
 st.download_button(
     "⬇️ Download Renewal Opportunity List (CSV)",
@@ -546,7 +541,6 @@ st.download_button(
     key="dl_btn_renewal_table",
 )
 
-# Renewal Opportunity - Limited to Top 10 Accounts
 st.subheader("📧 Renewal Opportunity - By Customer Email")
 st.write(
     f"Total Renewal Opportunities: **{stats['renewal_opportunity_count']:,} vehicles**"
@@ -563,28 +557,18 @@ renewal_with_email = renewal_opportunity.copy()
 has_email = renewal_with_email["primary_email"] != ""
 email_groups = renewal_with_email[has_email].groupby("primary_email")
 
-# Sort customer email groups by vehicle count descending and limit to top 10
-sorted_email_groups = sorted(
-    email_groups, key=lambda x: len(x[1]), reverse=True
-)
+sorted_email_groups = sorted(email_groups, key=lambda x: len(x[1]), reverse=True)
 top_10_email_groups = sorted_email_groups[:10]
 
 st.write(
-    f"Showing top **{len(top_10_email_groups)}** customer account(s) with the highest number of expiring vehicles (out of {len(sorted_email_groups)} total accounts):"
+    f"Showing top **{len(top_10_email_groups)}** customer account(s) with the highest number of expiring vehicles:"
 )
 
 for email, group in top_10_email_groups:
     label = f"{email} - {len(group)} vehicle(s) expiring soon"
     with st.expander(label):
         group_cols = [
-            c
-            for c in [
-                "id",
-                "name",
-                "plate_number",
-                "expiration_date",
-                "days_to_expiry",
-            ]
+            c for c in ["id", "name", "plate_number", "expiration_date", "days_to_expiry"]
             if c in group.columns
         ]
         st.dataframe(group[group_cols])
@@ -597,40 +581,13 @@ for email, group in top_10_email_groups:
         mailto_link = f"mailto:{email}?subject=Vehicle%20Subscription%20Renewal%20Reminder&body={body_text}"
         st.markdown(f"[Send renewal email]({mailto_link})")
 
-st.subheader("📥 Download Customer Contact List")
-contact_cols = [
-    "id",
-    "name",
-    "plate_number",
-    "sim_number",
-    "primary_email",
-    "expiration_date",
-    "days_to_expiry",
-]
-contact_export = df[df["primary_email"] != ""][
-    [c for c in contact_cols if c in df.columns]
-].copy()
-st.download_button(
-    "⬇️ Download Full Customer Email List (CSV)",
-    contact_export.to_csv(index=False),
-    "customer_email_list.csv",
-    "text/csv",
-)
-
-# Expired Vehicles Section
+# --- Expired Vehicles Section ---
 st.subheader("⚠️ Expired Vehicles List (All Units)")
 expired_df = df[df["days_to_expiry"] < 0][
     [
-        c
-        for c in [
-            "id",
-            "name",
-            "plate_number",
-            "sim_number",
-            "users_list",
-            "primary_email",
-            "expiration_date",
-            "days_to_expiry",
+        c for c in [
+            "id", "name", "plate_number", "sim_number", "users_list",
+            "primary_email", "expiration_date", "days_to_expiry",
         ]
         if c in df.columns
     ]
@@ -652,7 +609,9 @@ st.download_button(
     "text/csv",
 )
 
-# 9. AI Executive Assessment & Interactive Q&A via Gemini API
+# ==========================================
+# 10. AI Assessment & Q&A
+# ==========================================
 st.write("---")
 if GEMINI_API_KEY:
     try:
@@ -680,10 +639,9 @@ if GEMINI_API_KEY:
             task = a.get("task", "")
             detail = a.get("detail", "")
             st.markdown(f"- **{task}**: {detail}")
-    except Exception as e:
+    except Exception:
         st.info("AI summary engine standby or API rate limit reached.")
 
-# Interactive Q&A section
 st.subheader("❓ Ask a Question About This Fleet Data")
 question = st.text_input(
     "e.g., Which network has the most offline devices? or How many vehicles expire in 2026?"
