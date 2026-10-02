@@ -2,6 +2,7 @@ import json
 import os
 import re
 import pandas as pd
+import requests
 
 from dotenv import load_dotenv
 from google import genai
@@ -155,7 +156,7 @@ def extract_clean_unique_emails(dataframe):
 def safe_read_file(file_source):
     filename = getattr(file_source, "name", str(file_source))
     if filename.endswith((".xlsx", ".xls")):
-        return pd.read_excel(file_source)
+        return pd.read_excel(file_source, dtype=str)
     try:
         return pd.read_csv(file_source, encoding="utf-8-sig", dtype=str)
     except pd.errors.EmptyDataError:
@@ -166,6 +167,23 @@ def safe_read_file(file_source):
             return pd.read_csv(file_source, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
         except Exception:
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
+
+# Zoho CRM API Helpers
+def get_zoho_access_token():
+    client_id = os.getenv("ZOHO_CLIENT_ID")
+    client_secret = os.getenv("ZOHO_CLIENT_SECRET")
+    refresh_token = os.getenv("ZOHO_REFRESH_TOKEN")
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+    url = f"https://accounts.zoho.com/oauth/v2/token?refresh_token={refresh_token}&client_id={client_id}&client_secret={client_secret}&grant_type=refresh_token"
+    res = requests.post(url)
+    return res.json().get("access_token") if res.status_code == 200 else None
+
+def fetch_zoho_module(module_name, access_token):
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    url = f"https://www.zohoapis.com/crm/v3/{module_name}?fields=id,Email,Contact_Name,Phone,Full_Name,Account_Name"
+    res = requests.get(url, headers=headers)
+    return pd.DataFrame(res.json().get("data", [])) if res.status_code == 200 else pd.DataFrame()
 
 # ==========================================
 # 5. File Selection & Execution
@@ -251,6 +269,79 @@ c5.metric("Expired (last 24h)", len(expired_24h))
 c6.metric("Expired (last 30d)", len(expired_30d))
 c7.metric("Expiring (next 24h)", len(expiring_24h))
 c8.metric("Expiring (next 30d)", len(expiring_30d))
+
+# ==========================================
+# 7. ZOHO CRM & EXPIRED FLEET RECOVERY LINKER
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">📞 Zoho CRM & Expired Fleet Recovery Linker</div>', unsafe_allow_html=True)
+
+sync_mode = st.radio("Select Integration Mode:", ["🔄 Live Zoho CRM API Sync", "📁 Manual Zoho File Upload"], horizontal=True)
+
+if sync_mode == "🔄 Live Zoho CRM API Sync":
+    if st.button("⚡ Fetch & Merge Live Data from Zoho CRM"):
+        with st.spinner("Connecting to Zoho CRM API and generating recovery lists..."):
+            token = get_zoho_access_token()
+            if not token:
+                st.error("Could not generate Zoho Access Token. Please verify ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, and ZOHO_REFRESH_TOKEN in your .env file.")
+            else:
+                deals_df = fetch_zoho_module("Deals", token)
+                contacts_df = fetch_zoho_module("Contacts", token)
+
+                if not deals_df.empty and not contacts_df.empty:
+                    expired_df = df[df["days_to_expiry"] < 0].copy()
+                    merged_deals = pd.merge(expired_df, deals_df, left_on="primary_email", right_on="Email", how="inner")
+                    final_merged = pd.merge(merged_deals, contacts_df, left_on="Contact_Name", right_on="Full_Name", how="inner")
+
+                    st.success(f"Matched **{len(final_merged):,} expired vehicle records** directly from Zoho CRM!")
+
+                    rc1, rc2 = st.columns(2)
+                    rc1.metric("Calling Contacts Found", f"{len(final_merged):,}")
+                    rc1.download_button("⬇️ Download Calling List (CSV)", final_merged[["Full_Name", "Phone", "plate_number", "expiration_date"]].to_csv(index=False), "Zoho_Calling_List.csv", "text/csv")
+
+                    rc2.metric("Email Contacts Found", f"{len(final_merged):,}")
+                    rc2.download_button("⬇️ Download Email List (CSV)", final_merged[["Full_Name", "Email", "plate_number", "expiration_date"]].to_csv(index=False), "Zoho_Email_List.csv", "text/csv")
+                else:
+                    st.warning("Could not retrieve Deals or Contacts records from Zoho CRM.")
+
+else:
+    col_deal, col_cust = st.columns(2)
+    with col_deal:
+        deals_file = st.file_uploader("Upload Zoho Deals File (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="zoho_deals")
+    with col_cust:
+        customers_file = st.file_uploader("Upload Zoho Customers File (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="zoho_cust")
+
+    if deals_file and customers_file:
+        if st.button("⚡ Merge Data & Generate Recovery Lists"):
+            try:
+                deal_df = safe_read_file(deals_file)
+                customer_df = safe_read_file(customers_file)
+
+                deal_df.columns = deal_df.columns.astype(str).str.strip()
+                customer_df.columns = customer_df.columns.astype(str).str.strip()
+
+                expired_df = df[df["days_to_expiry"] < 0].copy()
+
+                deal_email_col = next((c for c in deal_df.columns if "email" in c.lower()), deal_df.columns[0])
+                deal_contact_col = next((c for c in deal_df.columns if "contact" in c.lower() or "name" in c.lower()), deal_df.columns[0])
+                cust_name_col = next((c for c in customer_df.columns if "name" in c.lower() or "contact" in c.lower()), customer_df.columns[0])
+                cust_phone_col = next((c for c in customer_df.columns if "phone" in c.lower() or "mobile" in c.lower()), customer_df.columns[0])
+
+                merged_deals = pd.merge(expired_df, deal_df, left_on="primary_email", right_on=deal_email_col, how="inner")
+                final_merged = pd.merge(merged_deals, customer_df, left_on=deal_contact_col, right_on=cust_name_col, how="inner")
+
+                st.success(f"Successfully matched **{len(final_merged):,} records**!")
+
+                res_col1, res_col2 = st.columns(2)
+                with res_col1:
+                    st.metric("Phone Numbers Found for Calling", f"{len(final_merged):,}")
+                    st.download_button("⬇️ Download Calling List (CSV)", final_merged[[cust_name_col, cust_phone_col, "plate_number", "expiration_date"]].to_csv(index=False), "Expired_Vehicles_Calling_List.csv", "text/csv")
+                with res_col2:
+                    st.metric("Verified Email Contacts Found", f"{len(final_merged):,}")
+                    st.download_button("⬇️ Download Email List (CSV)", final_merged[[cust_name_col, "primary_email", "plate_number", "expiration_date"]].to_csv(index=False), "Expired_Vehicles_Email_List.csv", "text/csv")
+
+            except Exception as e:
+                st.error(f"Error linking datasets: {e}")
 
 st.write("---")
 st.markdown('<div class="icon-header">✉️ Deduplicated Clean Customer Emails</div>', unsafe_allow_html=True)
