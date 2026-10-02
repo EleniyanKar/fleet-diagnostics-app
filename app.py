@@ -79,6 +79,31 @@ EXCLUDED_KEYWORDS = [
 ]
 
 # ==========================================
+# ✉️ DEDUPLICATED CLEAN CUSTOMER EMAIL EXPORTER
+# ==========================================
+st.write("---")
+st.subheader("✉️ Deduplicated Customer Email Campaign Exporter")
+
+# Run the extraction and deduplication process
+clean_emails_df = extract_clean_unique_emails(df)
+
+st.write(
+    f"Total Unique Clean Customer Emails Found: **{len(clean_emails_df):,}** "
+    "*(1 email per row, deduplicated, excluding internal `@cartracker` addresses)*"
+)
+
+# Display preview in Streamlit UI
+st.dataframe(clean_emails_df, use_container_width=True)
+
+# Direct Download Button for Zoho Campaigns / Bulk Emailers
+st.download_button(
+    label="⬇️ Download Clean Customer Emails (CSV for Zoho Campaigns)",
+    data=clean_emails_df.to_csv(index=False).encode("utf-8"),
+    file_name="deduplicated_customer_emails.csv",
+    mime="text/csv",
+)
+
+# ==========================================
 # 3. Telecom Network Prefixes (Nigeria)
 # ==========================================
 NETWORK_PREFIXES = {
