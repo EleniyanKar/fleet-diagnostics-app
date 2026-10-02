@@ -79,31 +79,6 @@ EXCLUDED_KEYWORDS = [
 ]
 
 # ==========================================
-# ✉️ DEDUPLICATED CLEAN CUSTOMER EMAIL EXPORTER
-# ==========================================
-st.write("---")
-st.subheader("✉️ Deduplicated Customer Email Campaign Exporter")
-
-# Run the extraction and deduplication process
-clean_emails_df = extract_clean_unique_emails(df)
-
-st.write(
-    f"Total Unique Clean Customer Emails Found: **{len(clean_emails_df):,}** "
-    "*(1 email per row, deduplicated, excluding internal `@cartracker` addresses)*"
-)
-
-# Display preview in Streamlit UI
-st.dataframe(clean_emails_df, use_container_width=True)
-
-# Direct Download Button for Zoho Campaigns / Bulk Emailers
-st.download_button(
-    label="⬇️ Download Clean Customer Emails (CSV for Zoho Campaigns)",
-    data=clean_emails_df.to_csv(index=False).encode("utf-8"),
-    file_name="deduplicated_customer_emails.csv",
-    mime="text/csv",
-)
-
-# ==========================================
 # 3. Telecom Network Prefixes (Nigeria)
 # ==========================================
 NETWORK_PREFIXES = {
@@ -211,7 +186,7 @@ def fetch_zoho_module(module_name, access_token):
     return pd.DataFrame(res.json().get("data", [])) if res.status_code == 200 else pd.DataFrame()
 
 # ==========================================
-# 5. File Selection & Execution
+# 5. File Selection & Dataset Execution
 # ==========================================
 uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
@@ -276,10 +251,44 @@ else:
 network_breakdown = df["sim_network"].value_counts()
 offline_by_network = df[df["hours_offline"] > 24]["sim_network"].value_counts()
 
+missing_sim = df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")] if "sim_number" in df.columns else df
+sim_counts = df["sim_number"].astype(str).value_counts() if "sim_number" in df.columns else pd.Series()
+duplicate_sims = sim_counts[sim_counts > 1].index.tolist()
+duplicate_sim_rows = df[df["sim_number"].astype(str).isin(duplicate_sims) & (df["sim_number"].astype(str) != "nan")] if "sim_number" in df.columns else df.head(0)
+
+if "imei" in df.columns:
+    df["imei_clean"] = df["imei"].astype(str).str.replace(".00", "", regex=False).str.strip()
+    invalid_imei = df[~df["imei"].apply(valid_imei)]
+    imei_counts = df["imei_clean"].value_counts()
+    duplicate_imeis = imei_counts[imei_counts > 1].index.tolist()
+    duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imeis)]
+else:
+    invalid_imei = df.head(0)
+    duplicate_imei_rows = df.head(0)
+
 renewal_opportunity = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) & (df["hours_offline"] <= 24)].sort_values("days_to_expiry")
 
+stats = {
+    "total_vehicles": len(df),
+    "reporting_24h": len(reporting_24h),
+    "not_reporting": len(not_reporting),
+    "expired_last_24h": len(expired_24h),
+    "expired_last_30d": len(expired_30d),
+    "expired_total": len(expired_total),
+    "expiring_next_24h": len(expiring_24h),
+    "expiring_next_30d": len(expiring_30d),
+    "active_vehicles": len(active_vehicles),
+    "active_but_offline": len(active_but_offline),
+    "missing_sim": len(missing_sim),
+    "duplicate_sim_count": len(duplicate_sim_rows),
+    "invalid_imei": len(invalid_imei),
+    "duplicate_imei_count": len(duplicate_imei_rows),
+    "renewal_opportunity_count": len(renewal_opportunity),
+    "network_breakdown": network_breakdown.to_dict(),
+}
+
 # ==========================================
-# 6. Dashboard UI Rendering
+# 6. Dashboard UI Metrics Rendering
 # ==========================================
 st.success("Analysis Complete!")
 
@@ -368,11 +377,15 @@ else:
             except Exception as e:
                 st.error(f"Error linking datasets: {e}")
 
+# ==========================================
+# 8. Clean Customer Email Campaign Exporter
+# ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">✉️ Deduplicated Clean Customer Emails</div>', unsafe_allow_html=True)
 clean_emails_df = extract_clean_unique_emails(df)
 
-st.write(f"Total Clean Customer Emails: **{len(clean_emails_df):,}**")
+st.write(f"Total Clean Customer Emails: **{len(clean_emails_df):,}** *(1 email per row, deduplicated, excluding internal `@cartracker` addresses and blacklisted emails)*")
+st.dataframe(clean_emails_df, use_container_width=True)
 st.download_button(
     label="⬇️ Download Clean Unique Emails (CSV)",
     data=clean_emails_df.to_csv(index=False).encode("utf-8"),
@@ -380,10 +393,67 @@ st.download_button(
     mime="text/csv",
 )
 
+# ==========================================
+# 9. Network Analytics & Data Quality
+# ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">📡 Network Breakdown</div>', unsafe_allow_html=True)
 st.bar_chart(network_breakdown)
 
+st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Missing SIM", stats["missing_sim"])
+d2.metric("Duplicate SIMs", stats["duplicate_sim_count"])
+d3.metric("Invalid IMEI", stats["invalid_imei"])
+d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
+
+# ==========================================
+# 10. Renewal Opportunities & Expired List
+# ==========================================
+st.write("---")
 st.markdown('<div class="icon-header">💰 Renewal Opportunities</div>', unsafe_allow_html=True)
 st.write(f"Found **{len(renewal_opportunity):,} vehicles** ready for renewal.")
 st.dataframe(renewal_opportunity[["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date"]], use_container_width=True)
+
+st.markdown('<div class="icon-header">⚠️ Expired Vehicles List (All Units)</div>', unsafe_allow_html=True)
+expired_df = df[df["days_to_expiry"] < 0]
+st.write(f"Found **{len(expired_df):,} total expired vehicles**.")
+st.download_button(
+    "⬇️ Download Expired Vehicles List (CSV)",
+    expired_df.to_csv(index=False),
+    "expired_vehicles_list.csv",
+    "text/csv",
+)
+
+# ==========================================
+# 11. AI Intelligence via Gemini API
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">🤖 AI Fleet Intelligence</div>', unsafe_allow_html=True)
+
+if GEMINI_API_KEY:
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            "You are analyzing a fleet tracking dataset. Use ONLY these verified numbers:\n"
+            + json.dumps(stats, indent=2, default=str)
+            + "\n\nReturn valid JSON with keys: summary, insights, actions."
+        )
+        response = client.models.generate_content(
+            model="gemini-3.6-flash", contents=prompt
+        )
+        raw = response.text.strip().strip("`").replace("json", "", 1).strip()
+        result = json.loads(raw)
+
+        st.subheader("📋 AI Executive Summary")
+        st.write(result.get("summary", ""))
+
+        st.subheader("💡 Insights")
+        for i in result.get("insights", []):
+            st.markdown(f"- {i}")
+
+        st.subheader("🛠️ Recommended Actions")
+        for a in result.get("actions", []):
+            st.markdown(f"- **{a.get('task', '')}**: {a.get('detail', '')}")
+    except Exception:
+        st.info("AI summary engine standby or API rate limit reached.")
