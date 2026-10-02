@@ -185,6 +185,42 @@ def fetch_zoho_module(module_name, access_token):
     res = requests.get(url, headers=headers)
     return pd.DataFrame(res.json().get("data", [])) if res.status_code == 200 else pd.DataFrame()
 
+def render_recovery_actions(merged_df, name_col, phone_col, email_col, plate_col="plate_number", expiry_col="expiration_date"):
+    """Shows each expired customer with clickable Call and Email actions."""
+    if merged_df.empty:
+        st.info("No matched records to show actions for.")
+        return
+
+    for _, row in merged_df.iterrows():
+        name = str(row.get(name_col, "Customer"))
+        phone = str(row.get(phone_col, "")).strip()
+        email = str(row.get(email_col, "")).strip()
+        plate = str(row.get(plate_col, ""))
+        expiry = str(row.get(expiry_col, ""))
+
+        with st.expander(f"{name} — {plate} (expired {expiry})"):
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                if phone and phone.lower() != "nan":
+                    phone_clean = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
+                    st.markdown(f"📞 [Call {phone}](tel:{phone_clean})")
+                else:
+                    st.caption("No phone number on file")
+
+            with col_b:
+                if email and email.lower() != "nan" and "@" in email:
+                    subject = "Vehicle%20Subscription%20Expired%20-%20Renew%20Now"
+                    body = (
+                        f"Dear%20{name.replace(' ', '%20')}%2C%0A%0A"
+                        f"Your%20vehicle%20{plate}%20subscription%20expired%20on%20{expiry}.%0A%0A"
+                        f"Please%20renew%20to%20restore%20tracking%20service."
+                    )
+                    mailto = f"mailto:{email}?subject={subject}&body={body}"
+                    st.markdown(f"✉️ [Email {email}]({mailto})")
+                else:
+                    st.caption("No email on file")
+
 # ==========================================
 # 5. File Selection & Dataset Execution
 # ==========================================
@@ -335,6 +371,10 @@ if sync_mode == "🔄 Live Zoho CRM API Sync":
 
                     rc2.metric("Email Contacts Found", f"{len(final_merged):,}")
                     rc2.download_button("⬇️ Download Email List (CSV)", final_merged[["Full_Name", "Email", "plate_number", "expiration_date"]].to_csv(index=False), "Zoho_Email_List.csv", "text/csv")
+
+                    st.write("---")
+                    st.markdown('<div class="icon-header">📲 Recovery Actions</div>', unsafe_allow_html=True)
+                    render_recovery_actions(final_merged, "Full_Name", "Phone", "Email")
                 else:
                     st.warning("Could not retrieve Deals or Contacts records from Zoho CRM.")
 
@@ -373,6 +413,10 @@ else:
                 with res_col2:
                     st.metric("Verified Email Contacts Found", f"{len(final_merged):,}")
                     st.download_button("⬇️ Download Email List (CSV)", final_merged[[cust_name_col, "primary_email", "plate_number", "expiration_date"]].to_csv(index=False), "Expired_Vehicles_Email_List.csv", "text/csv")
+
+                st.write("---")
+                st.markdown('<div class="icon-header">📲 Recovery Actions</div>', unsafe_allow_html=True)
+                render_recovery_actions(final_merged, cust_name_col, cust_phone_col, "primary_email")
 
             except Exception as e:
                 st.error(f"Error linking datasets: {e}")
