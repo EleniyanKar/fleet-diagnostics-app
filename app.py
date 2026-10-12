@@ -113,10 +113,36 @@ def is_excluded_email(email):
 
 
 def extract_emails(value):
-    if pd.isna(value):
+    """Extract emails safely from strings, lists, and missing values."""
+    if value is None:
         return []
-    found = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", str(value))
-    return [email.lower() for email in found if not is_excluded_email(email)]
+
+    # Some columns (especially user_emails) may contain lists rather than strings.
+    if isinstance(value, (list, tuple, set)):
+        found = []
+        for item in value:
+            found.extend(extract_emails(item))
+        return list(dict.fromkeys(found))
+
+    # pd.isna() can return an array for list-like values, so only call it
+    # after handling those values above.
+    try:
+        if pd.isna(value):
+            return []
+    except (TypeError, ValueError):
+        pass
+
+    text_value = str(value).strip()
+    if text_value.lower() in ("", "nan", "none", "null"):
+        return []
+
+    found = re.findall(
+        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        text_value,
+    )
+    return list(dict.fromkeys(
+        email.lower() for email in found if not is_excluded_email(email)
+    ))
 
 
 def valid_imei(value):
