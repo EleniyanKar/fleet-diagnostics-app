@@ -170,6 +170,28 @@ def safe_read_file(file_source):
 # ==========================================
 # 5. File Selection & Dataset Execution
 # ==========================================
+import zipfile
+
+# ==========================================
+# 5. File Selection & Dataset Execution (Auto-Extract Zips)
+# ==========================================
+
+# Automatically extract Zoho zips if present in repository
+for zip_name, target_csv in [("Deals_2026_10_02.zip", "Deals_2026_10_02.csv"), ("Customer_2026_10_02.zip", "Customers_2026_10_02.csv")]:
+    if os.path.exists(zip_name) and not os.path.exists(target_csv):
+        try:
+            with zipfile.ZipFile(zip_name, 'r') as zip_ref:
+                zip_ref.extractall(".")
+        except Exception:
+            pass
+
+# Default file paths
+DEFAULT_DEALS = "Deals_2026_10_02.csv"
+DEFAULT_CUST = "Customers_2026_10_02.csv"
+
+
+
+
 uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
 
