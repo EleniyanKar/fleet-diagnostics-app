@@ -218,50 +218,90 @@ def ensure_columns(dataframe, columns):
     return dataframe
 
 # ============================================================
-# 4. Uploads and source dataset
+# 4. Load files already committed to the GitHub repository
 # ============================================================
-uploaded_file = st.file_uploader("Upload fleet report (optional)", type=["csv", "xlsx", "xls"])
-airtel_file = st.file_uploader("Upload Airtel SIM list (optional; used for verified Airtel matching)", type=["csv", "xlsx", "xls"])
+# No upload widgets: the app reads the committed report files automatically.
+FLEET_REPORT_CANDIDATES = [
+    "devices_report.csv",
+    "devices_report.csv.csv",
+    "devices_report_1789914045.csv",
+]
 
+fleet_path = next(
+    (path for path in FLEET_REPORT_CANDIDATES
+     if os.path.isfile(path) and os.path.getsize(path) > 0),
+    None,
+)
+
+if fleet_path is None:
+    # Fall back to the most recently modified device-report CSV in the repo.
+    other_reports = sorted(
+        [path for path in glob.glob("*.csv")
+         if "device" in Path(path).name.lower() and os.path.getsize(path) > 0],
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    fleet_path = other_reports[0] if other_reports else None
+
+if fleet_path is None:
+    st.error(
+        "Fleet report not found. Commit `devices_report.csv` (or one of the supported "
+        "device-report filenames) to the same GitHub repository folder as `app.py`."
+    )
+    st.stop()
+
+try:
+    df = clean_columns(read_file(fleet_path))
+    st.caption(f"Fleet data source: `{fleet_path}` (loaded from the GitHub repository)")
+except Exception as exc:
+    st.error(f"Could not read fleet report `{fleet_path}`: {exc}")
+    st.stop()
+
+# Automatically locate the verified Airtel SIM inventory committed to the repo.
+AIRTEL_FILE_PATTERNS = [
+    "*airtel*.csv", "*airtel*.xlsx", "*airtel*.xls",
+    "*sim*list*.csv", "*sim*list*.xlsx", "*sim*list*.xls",
+]
+airtel_candidates = []
+for pattern in AIRTEL_FILE_PATTERNS:
+    airtel_candidates.extend(glob.glob(pattern))
+airtel_candidates = sorted(
+    {path for path in airtel_candidates
+     if os.path.isfile(path) and os.path.getsize(path) > 0
+     and Path(path).name != Path(fleet_path).name},
+    key=os.path.getmtime,
+    reverse=True,
+)
 verified_airtel_numbers = set()
-if airtel_file is not None:
+airtel_source_path = None
+if airtel_candidates:
+    airtel_source_path = airtel_candidates[0]
     try:
-        airtel_df = clean_columns(read_file(airtel_file))
+        airtel_df = clean_columns(read_file(airtel_source_path))
         airtel_col = next((col for col in airtel_df.columns if str(col).strip().lower() in {
             "msisdn", "phone", "sim", "sim_number", "mobile", "line", "number", "mobile number"
         }), None)
         if airtel_col is None and len(airtel_df.columns):
             airtel_col = airtel_df.columns[0]
         if airtel_col is not None:
-            verified_airtel_numbers = {normalize_number(v) for v in airtel_df[airtel_col].dropna()}
+            verified_airtel_numbers = {
+                normalize_number(value) for value in airtel_df[airtel_col].dropna()
+            }
             verified_airtel_numbers.discard("")
-            st.success(f"Loaded {len(verified_airtel_numbers):,} unique Airtel numbers from column `{airtel_col}`.")
+            st.caption(
+                f"Verified Airtel SIM source: `{airtel_source_path}` — "
+                f"{len(verified_airtel_numbers):,} unique numbers loaded."
+            )
         else:
-            st.warning("The Airtel file has no usable columns.")
+            st.warning(f"Airtel file `{airtel_source_path}` has no usable columns.")
     except Exception as exc:
-        st.error(f"Could not read the Airtel SIM file: {exc}")
-
-if uploaded_file is not None:
-    try:
-        df = clean_columns(read_file(uploaded_file))
-    except Exception as exc:
-        st.error(f"Could not read the uploaded fleet report: {exc}")
-        st.stop()
+        st.warning(f"Could not read Airtel SIM file `{airtel_source_path}`: {exc}")
 else:
-    default_candidates = [
-        "devices_report.csv.csv", "devices_report_1789914045.csv", "devices_report.csv"
-    ]
-    default_path = next((path for path in default_candidates if os.path.isfile(path) and os.path.getsize(path) > 0), None)
-    if default_path:
-        try:
-            df = clean_columns(read_file(default_path))
-            st.caption(f"Using default fleet report: `{default_path}`")
-        except Exception as exc:
-            st.error(f"Could not read default fleet report `{default_path}`: {exc}")
-            st.stop()
-    else:
-        st.info("Upload a fleet report to start the dashboard. The report can be CSV or Excel.")
-        st.stop()
+    st.warning(
+        "No Airtel SIM inventory was found automatically. Commit a file whose name includes "
+        "`airtel` (for example `airtel_sim_list.csv`) beside `app.py` to enable verified Airtel matching. "
+        "Network prefixes will still be shown as estimates, not verified lines."
+    )
 
 if df.empty:
     st.error("The fleet report contains no rows.")
@@ -288,8 +328,8 @@ df["imei_clean"] = df["imei"].fillna("").astype(str).str.replace(r"\.0+$", "", r
 # ============================================================
 # 5. Fleet metrics
 # ============================================================
-reporting_24h = df[df["hours_offline"].notna() & (df["hours_offline"] >= 0) & (df["hours_offline"] <= 24)]
-not_reporting = df[df["hours_offline"].isna() | (df["hours_offline"] > 24)]
+reporting_30h = df[df["hours_offline"].notna() & (df["hours_offline"] >= 0) & (df["hours_offline"] <= 30)]
+not_reporting = df[df["hours_offline"].isna() | (df["hours_offline"] < 0) | (df["hours_offline"] > 30)]
 expired_total = df[df["days_to_expiry"] < 0]
 expired_24h = df[(df["days_to_expiry"] < 0) & (df["days_to_expiry"] >= -1)]
 expired_30d = df[(df["days_to_expiry"] < 0) & (df["days_to_expiry"] >= -30)]
@@ -297,7 +337,7 @@ expiring_24h = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 1)]
 expiring_30d = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30)]
 active_mask = df["active"].astype(str).str.strip().str.lower().isin(["1", "true", "yes", "active"])
 active_vehicles = df[active_mask]
-active_but_offline = active_vehicles[active_vehicles["hours_offline"].isna() | (active_vehicles["hours_offline"] > 24)]
+active_but_offline = active_vehicles[active_vehicles["hours_offline"].isna() | (active_vehicles["hours_offline"] < 0) | (active_vehicles["hours_offline"] > 30)]
 missing_sim = df[df["sim_number_norm"] == ""]
 valid_sim = df[df["sim_number_norm"] != ""]
 sim_counts = valid_sim["sim_number_norm"].value_counts()
@@ -307,7 +347,7 @@ invalid_imei = df[~df["imei"].apply(valid_imei)]
 valid_imei_values = df.loc[df["imei"].apply(valid_imei), "imei_clean"]
 duplicate_imei_values = set(valid_imei_values[valid_imei_values.duplicated(keep=False)])
 duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imei_values)]
-renewal_opportunity = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) & (df["hours_offline"].notna()) & (df["hours_offline"] <= 24)].sort_values("days_to_expiry")
+renewal_opportunity = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) & (df["hours_offline"].notna()) & (df["hours_offline"] <= 30)].sort_values("days_to_expiry")
 network_breakdown = df["sim_network"].value_counts()
 
 # ============================================================
@@ -317,7 +357,7 @@ st.success("Analysis complete")
 st.caption(f"Report contains {len(df):,} records. Dates are interpreted using the app server's current time.")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Reporting (24h)", f"{len(reporting_24h):,}")
+c1.metric("Reporting (last 30h)", f"{len(reporting_30h):,}")
 c2.metric("Not Reporting / Unknown", f"{len(not_reporting):,}")
 c3.metric("Expired (total)", f"{len(expired_total):,}")
 c4.metric("Active but Offline", f"{len(active_but_offline):,}")
@@ -413,13 +453,13 @@ network_df = pd.DataFrame({
 })
 st.dataframe(network_df, use_container_width=True, hide_index=True)
 
-st.markdown('<div class="icon-header">📡 Verified Airtel SIMs Offline for 48+ Hours</div>', unsafe_allow_html=True)
-airtel_48h_offline = df[(df["sim_network"] == "Airtel (verified)") & (df["hours_offline"] >= 48)].sort_values("hours_offline", ascending=False)
-st.write(f"Found **{len(airtel_48h_offline):,} verified Airtel units** offline for 48 hours or more.")
-if not airtel_48h_offline.empty:
-    airtel_cols = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_48h_offline.columns]
-    st.dataframe(airtel_48h_offline[airtel_cols], use_container_width=True)
-    st.download_button("⬇️ Download Airtel 48h+ offline list", airtel_48h_offline[airtel_cols].to_csv(index=False).encode("utf-8"), "airtel_48h_offline_fleet.csv", "text/csv")
+st.markdown('<div class="icon-header">📡 Verified Airtel SIMs Offline for 30+ Hours</div>', unsafe_allow_html=True)
+airtel_30h_offline = df[(df["sim_network"] == "Airtel (verified)") & (df["hours_offline"] >= 30)].sort_values("hours_offline", ascending=False)
+st.write(f"Found **{len(airtel_30h_offline):,} verified Airtel units** offline for 30 hours or more.")
+if not airtel_30h_offline.empty:
+    airtel_cols = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_30h_offline.columns]
+    st.dataframe(airtel_30h_offline[airtel_cols], use_container_width=True)
+    st.download_button("⬇️ Download Airtel 30h+ offline list", airtel_30h_offline[airtel_cols].to_csv(index=False).encode("utf-8"), "airtel_30h_offline_fleet.csv", "text/csv")
 
 st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
 d1, d2, d3, d4 = st.columns(4)
@@ -428,12 +468,146 @@ d2.metric("Rows with Duplicate SIMs", f"{len(duplicate_sim_rows):,}")
 d3.metric("Invalid IMEI", f"{len(invalid_imei):,}")
 d4.metric("Rows with Duplicate IMEIs", f"{len(duplicate_imei_rows):,}")
 
+
 # ============================================================
-# 10. Renewals and expired fleet
+# 10. SIM & Device Troubleshooting Workbench
+# ============================================================
+st.markdown("---")
+st.subheader("🛠️ SIM & Device Troubleshooting Workbench")
+st.caption(
+    "This section flags likely troubleshooting priorities from the uploaded report. "
+    "It cannot remotely test a SIM, confirm network coverage, or prove a device is faulty."
+)
+
+trouble = df.copy()
+
+def troubleshooting_reason(row):
+    reasons = []
+    sim = str(row.get("sim_number_norm", "")).strip()
+    imei = str(row.get("imei_clean", "")).strip()
+    hours = row.get("hours_offline")
+    network = str(row.get("sim_network", "Unknown/Other"))
+    active = str(row.get("active", "")).strip().lower() in {"1", "true", "yes", "active"}
+
+    if not sim:
+        reasons.append("SIM number missing — verify SIM is installed and recorded")
+    if not imei or not valid_imei(imei):
+        reasons.append("IMEI missing/invalid — verify device label and platform record")
+    if pd.isna(hours):
+        reasons.append("No valid last-report time — check device record and server reporting")
+    elif hours >= 30:
+        if network == "Airtel (verified)":
+            reasons.append("Verified Airtel SIM offline 30h+ — check SIM status/data, signal, power and server settings")
+        else:
+            reasons.append("Offline 30h+ — check vehicle power, SIM/data, signal, wiring and server settings")
+    elif hours > 30:
+        reasons.append("Offline 30h+ — check ignition/power, signal and recent tracker reports")
+    if not active:
+        reasons.append("Device marked inactive — confirm subscription/account status")
+    if row.get("days_to_expiry") is not None and not pd.isna(row.get("days_to_expiry")) and row.get("days_to_expiry") < 0:
+        reasons.append("Subscription expired — verify renewal status")
+    return reasons
+
+trouble["troubleshooting_flags"] = trouble.apply(troubleshooting_reason, axis=1)
+trouble["troubleshooting_priority"] = trouble.apply(
+    lambda row: "High" if (
+        (pd.isna(row.get("hours_offline")) or row.get("hours_offline", 0) >= 30)
+        and (not str(row.get("sim_number_norm", "")).strip() or not valid_imei(row.get("imei_clean", "")))
+    ) or row.get("sim_network") == "Airtel (verified)" and (
+        pd.isna(row.get("hours_offline")) or row.get("hours_offline", 0) >= 30
+    ) else (
+        "Medium" if pd.isna(row.get("hours_offline")) or row.get("hours_offline", 0) > 30 else "Low"
+    ),
+    axis=1,
+)
+trouble["troubleshooting_flags"] = trouble["troubleshooting_flags"].apply(
+    lambda flags: "; ".join(flags) if flags else "No immediate issue detected from available report fields"
+)
+
+priority_filter = st.multiselect(
+    "Filter troubleshooting priority",
+    options=["High", "Medium", "Low"],
+    default=["High", "Medium"],
+    key="trouble_priority_filter",
+)
+issue_filter = st.selectbox(
+    "Show devices with",
+    options=[
+        "Any flagged issue",
+        "Any flagged issue",
+        "Offline 30h+",
+        "Missing SIM",
+        "Invalid IMEI",
+        "Verified Airtel offline 30h+",
+        "Expired subscription",
+    ],
+    key="trouble_issue_filter",
+)
+trouble_view = trouble[trouble["troubleshooting_priority"].isin(priority_filter)].copy()
+if issue_filter == "Offline 30h+":
+    trouble_view = trouble_view[trouble_view["hours_offline"] >= 30]
+elif issue_filter == "Missing SIM":
+    trouble_view = trouble_view[trouble_view["sim_number_norm"] == ""]
+elif issue_filter == "Invalid IMEI":
+    trouble_view = trouble_view[~trouble_view["imei"].apply(valid_imei)]
+elif issue_filter == "Verified Airtel offline 30h+":
+    trouble_view = trouble_view[
+        (trouble_view["sim_network"] == "Airtel (verified)") &
+        (trouble_view["hours_offline"] >= 30)
+    ]
+elif issue_filter == "Expired subscription":
+    trouble_view = trouble_view[trouble_view["days_to_expiry"] < 0]
+elif issue_filter == "Any flagged issue":
+    trouble_view = trouble_view[
+        trouble_view["troubleshooting_flags"] !=
+        "No immediate issue detected from available report fields"
+    ]
+
+t1, t2, t3 = st.columns(3)
+t1.metric("Devices in troubleshooting view", f"{len(trouble_view):,}")
+t2.metric("High priority", f"{(trouble_view['troubleshooting_priority'] == 'High').sum():,}")
+t3.metric("Offline 30h+", f"{(trouble_view['hours_offline'] >= 30).sum():,}")
+
+trouble_cols = [
+    col for col in [
+        "id", "name", "plate_number", "imei", "sim_number", "sim_network",
+        "active", "last_connect_time", "hours_offline", "expiration_date",
+        "troubleshooting_priority", "troubleshooting_flags",
+    ] if col in trouble_view.columns
+]
+if trouble_view.empty:
+    st.info("No devices match the selected troubleshooting filters.")
+else:
+    st.dataframe(trouble_view[trouble_cols], use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download troubleshooting list (CSV)",
+        trouble_view[trouble_cols].to_csv(index=False).encode("utf-8"),
+        "sim_device_troubleshooting.csv",
+        "text/csv",
+        key="download_sim_troubleshooting",
+    )
+
+with st.expander("Suggested field troubleshooting checklist"):
+    st.markdown(
+        """
+        1. **Confirm the record:** compare vehicle plate, IMEI and SIM/MSISDN with the physical device and SIM inventory.
+        2. **Check SIM status:** confirm the line is active, has the correct data plan/bundle, and is not barred or suspended with the telecom provider.
+        3. **Check coverage:** verify signal/network availability at the vehicle's current location.
+        4. **Check power:** inspect tracker power, ground, fuse and wiring; check whether the unit restarts when vehicle power changes.
+        5. **Check server settings:** verify the device's correct protocol, server domain/IP and port against the approved device configuration.
+        6. **Check reporting:** compare the last report time with the platform/server logs and confirm the device is assigned to the correct account.
+        7. **Retest before closing:** record the test time, person handling it, outcome and next action.
+
+        **Safety:** do not send configuration SMS commands or change server settings unless the exact device model and its command manual are confirmed.
+        """
+    )
+
+# ============================================================
+# 11. Renewals and expired fleet
 # ============================================================
 st.markdown("---")
 st.markdown('<div class="icon-header">💰 Renewal Opportunities</div>', unsafe_allow_html=True)
-st.write(f"Found **{len(renewal_opportunity):,} vehicles** that are reporting and expire within 30 days.")
+st.write(f"Found **{len(renewal_opportunity):,} vehicles** that reported within the last 30 hours and expire within 30 days.")
 renewal_cols = [c for c in ["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date"] if c in renewal_opportunity.columns]
 st.dataframe(renewal_opportunity[renewal_cols], use_container_width=True)
 st.download_button("⬇️ Download renewal opportunities (CSV)", renewal_opportunity.to_csv(index=False).encode("utf-8"), "renewal_opportunities.csv", "text/csv")
@@ -443,7 +617,36 @@ st.write(f"Found **{len(expired_total):,} expired vehicles**.")
 st.download_button("⬇️ Download expired vehicles (CSV)", expired_total.to_csv(index=False).encode("utf-8"), "expired_vehicles_list.csv", "text/csv")
 
 # ============================================================
-# 11. Optional Gemini AI summary
+# 12. Data sources, definitions and technical references
+# ============================================================
+st.markdown("---")
+with st.expander("📚 Data sources, definitions & references"):
+    st.markdown(
+        f"""
+        **Data files used**
+        - Fleet report: `{fleet_path}` from this GitHub repository.
+        - Verified Airtel SIM inventory: `{airtel_source_path}` if found; otherwise Airtel matches are not verified.
+        - Zoho CRM exports: the newest `Deals_*.csv` and `Customer_*.csv` files found beside `app.py`.
+
+        **How the dashboard interprets the data**
+        - **Reporting (last 30h):** `last_connect_time` is between now and 30 hours ago.
+        - **Not reporting / unknown:** no valid last-report timestamp, a future timestamp, or a report older than 30 hours.
+        - **Network labels:** Airtel is marked verified only when its normalized number matches the repository SIM inventory. Other Nigerian network labels are prefix estimates and can be wrong after mobile-number portability.
+        - **Offline does not prove SIM failure:** the cause can also be power, wiring, coverage, device configuration, server settings or stale platform data.
+        - **Renewal and expiry counts:** calculated from `expiration_date` using the app server's current time.
+
+        **Technical references**
+        - Streamlit documentation: https://docs.streamlit.io/
+        - pandas documentation (data cleaning and timestamps): https://pandas.pydata.org/docs/
+        - Google Gen AI Python SDK (optional AI summary): https://googleapis.github.io/python-genai/
+        - Nigerian Communications Commission (telecom regulation and numbering information): https://www.ncc.gov.ng/
+
+        These references describe the libraries and telecom context; the vehicle counts and account matches come from the repository exports, not from these websites.
+        """
+    )
+
+# ============================================================
+# 13. Optional Gemini AI summary
 # ============================================================
 st.markdown("---")
 st.markdown('<div class="icon-header">🤖 AI Fleet Intelligence</div>', unsafe_allow_html=True)
@@ -455,7 +658,7 @@ else:
     if st.button("Generate AI fleet summary"):
         stats = {
             "total_vehicles": int(len(df)),
-            "reporting_24h": int(len(reporting_24h)),
+            "reporting_30h": int(len(reporting_30h)),
             "not_reporting_or_unknown": int(len(not_reporting)),
             "expired_total": int(len(expired_total)),
             "expiring_next_30d": int(len(expiring_30d)),
