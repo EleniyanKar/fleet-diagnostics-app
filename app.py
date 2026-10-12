@@ -205,6 +205,50 @@ def first_existing_column(dataframe, candidates):
     return pd.Series([""] * len(dataframe), index=dataframe.index, dtype="object")
 
 
+def normalized_header(value):
+    """Normalize a column heading for flexible Zoho export matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def find_column_by_keywords(dataframe, exact_names=(), keywords=()):
+    """Find a likely contact field without assuming one Zoho export layout."""
+    columns = list(dataframe.columns)
+    normalized = {col: normalized_header(col) for col in columns}
+    exact = {normalized_header(name) for name in exact_names}
+    for col in columns:
+        if normalized[col] in exact:
+            return col
+    for col in columns:
+        heading = normalized[col]
+        if any(word in heading for word in keywords):
+            return col
+    return None
+
+
+def normalize_plate(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper().strip())
+
+
+def find_repository_files():
+    """List data files recursively so committed files in subfolders are discoverable."""
+    found = []
+    for root, _, files in os.walk("."):
+        # Ignore Git internals and virtual environments.
+        if any(part in root.split(os.sep) for part in (".git", ".venv", "venv", "__pycache__")):
+            continue
+        for filename in files:
+            if filename.lower().endswith((".csv", ".xlsx", ".xls")):
+                found.append(os.path.join(root, filename))
+    return found
+
+
 def parse_date_column(dataframe, column):
     if column not in dataframe.columns:
         dataframe[column] = pd.NaT
@@ -258,49 +302,58 @@ except Exception as exc:
     st.stop()
 
 # Automatically locate the verified Airtel SIM inventory committed to the repo.
-AIRTEL_FILE_PATTERNS = [
-    "*airtel*.csv", "*airtel*.xlsx", "*airtel*.xls",
-    "*sim*list*.csv", "*sim*list*.xlsx", "*sim*list*.xls",
-]
+# Search recursively and case-insensitively because GitHub filenames may be in subfolders
+# or use uppercase extensions. A generic SIM inventory is only accepted if it has a
+# recognizable line/MSISDN column.
+repository_data_files = find_repository_files()
 airtel_candidates = []
-for pattern in AIRTEL_FILE_PATTERNS:
-    airtel_candidates.extend(glob.glob(pattern))
+for path in repository_data_files:
+    lower_path = path.lower().replace("\\", "/")
+    if os.path.normpath(path) == os.path.normpath(fleet_path):
+        continue
+    base = Path(path).name.lower()
+    if any(token in base for token in ("airtel", "sim_list", "sim-list", "simlist", "msisdn")):
+        airtel_candidates.append(path)
+# Prefer filenames explicitly identifying Airtel; use a generic SIM-list file only second.
 airtel_candidates = sorted(
-    {path for path in airtel_candidates
-     if os.path.isfile(path) and os.path.getsize(path) > 0
-     and Path(path).name != Path(fleet_path).name},
-    key=os.path.getmtime,
-    reverse=True,
+    set(airtel_candidates),
+    key=lambda path: (0 if "airtel" in Path(path).name.lower() else 1, -os.path.getmtime(path)),
 )
 verified_airtel_numbers = set()
 airtel_source_path = None
 if airtel_candidates:
-    airtel_source_path = airtel_candidates[0]
-    try:
-        airtel_df = clean_columns(read_file(airtel_source_path))
-        airtel_col = next((col for col in airtel_df.columns if str(col).strip().lower() in {
-            "msisdn", "phone", "sim", "sim_number", "mobile", "line", "number", "mobile number"
-        }), None)
-        if airtel_col is None and len(airtel_df.columns):
-            airtel_col = airtel_df.columns[0]
-        if airtel_col is not None:
-            verified_airtel_numbers = {
-                normalize_number(value) for value in airtel_df[airtel_col].dropna()
-            }
-            verified_airtel_numbers.discard("")
-            st.caption(
-                f"Verified Airtel SIM source: `{airtel_source_path}` — "
-                f"{len(verified_airtel_numbers):,} unique numbers loaded."
+    for candidate_path in airtel_candidates:
+        try:
+            candidate_df = clean_columns(read_file(candidate_path))
+            airtel_col = find_column_by_keywords(
+                candidate_df,
+                exact_names=("msisdn", "phone", "sim", "sim_number", "mobile", "line", "number", "mobile number", "phone number", "telephone"),
+                keywords=("msisdn", "mobilenumber", "phonenumber", "simnumber", "mobile", "telephone", "msisdn", "line"),
             )
-        else:
-            st.warning(f"Airtel file `{airtel_source_path}` has no usable columns.")
-    except Exception as exc:
-        st.warning(f"Could not read Airtel SIM file `{airtel_source_path}`: {exc}")
+            if airtel_col is None and "airtel" in Path(candidate_path).name.lower() and len(candidate_df.columns) == 1:
+                airtel_col = candidate_df.columns[0]
+            if airtel_col is None:
+                continue
+            numbers = {normalize_number(value) for value in candidate_df[airtel_col].dropna()}
+            numbers.discard("")
+            if numbers:
+                verified_airtel_numbers = numbers
+                airtel_source_path = candidate_path
+                break
+        except Exception:
+            continue
+
+if airtel_source_path:
+    st.caption(
+        f"Verified Airtel SIM source: `{airtel_source_path}` — "
+        f"{len(verified_airtel_numbers):,} unique numbers loaded."
+    )
 else:
     st.warning(
-        "No Airtel SIM inventory was found automatically. Commit a file whose name includes "
-        "`airtel` (for example `airtel_sim_list.csv`) beside `app.py` to enable verified Airtel matching. "
-        "Network prefixes will still be shown as estimates, not verified lines."
+        "No usable Airtel SIM inventory was detected in the repository. Airtel prefix estimates "
+        "will still be categorized, but they are not verified against your Airtel line list. "
+        "Ensure the committed inventory filename includes `airtel` or `sim_list`, and that it "
+        "contains a column such as MSISDN, Phone, SIM Number, Mobile, or Line."
     )
 
 if df.empty:
@@ -371,8 +424,11 @@ c8.metric("Expiring (next 30d)", f"{len(expiring_30d):,}")
 # 7. Zoho CRM expired-fleet linker (optional files)
 # ============================================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
-deals_candidates = sorted(glob.glob("Deals_*.csv"), reverse=True)
-customer_candidates = sorted(glob.glob("Customer_*.csv"), reverse=True)
+all_repo_files = find_repository_files()
+deals_candidates = [p for p in all_repo_files if Path(p).name.lower().startswith("deals_") and Path(p).suffix.lower() == ".csv"]
+customer_candidates = [p for p in all_repo_files if Path(p).name.lower().startswith("customer_") and Path(p).suffix.lower() == ".csv"]
+deals_candidates = sorted(deals_candidates, key=os.path.getmtime, reverse=True)
+customer_candidates = sorted(customer_candidates, key=os.path.getmtime, reverse=True)
 
 if deals_candidates and customer_candidates:
     deals_path, customer_path = deals_candidates[0], customer_candidates[0]
@@ -380,50 +436,137 @@ if deals_candidates and customer_candidates:
     try:
         deals_df = clean_columns(read_file(deals_path))
         customer_df = clean_columns(read_file(customer_path))
-        deal_link_col = next((c for c in ["Customer Name.id", "Accounts Name.id", "Account Name.id"] if c in deals_df.columns), None)
-        customer_link_col = next((c for c in ["Record Id", "Record ID", "id"] if c in customer_df.columns), customer_df.columns[0] if len(customer_df.columns) else None)
-        deal_plate_col = next((c for c in ["Plate Number", "Deal Name", "Vehicle Name", "plate_number"] if c in deals_df.columns), None)
-        if not deal_link_col or not customer_link_col:
-            st.warning("Could not find the expected Zoho customer-link columns. Check the Deals and Customer export headers.")
-        elif not deal_plate_col:
-            st.warning("Could not find a vehicle plate column in the Deals export. Looked for Plate Number, Deal Name, and Vehicle Name.")
+
+        # Flexible ID matching: Zoho exports may name the relationship differently.
+        deal_link_col = find_column_by_keywords(
+            deals_df,
+            exact_names=("Customer Name.id", "Accounts Name.id", "Account Name.id", "Contact Name.id", "Customer.id", "Account.id"),
+            keywords=("customernameid", "accountnameid", "contactnameid", "customerid", "accountid"),
+        )
+        customer_link_col = find_column_by_keywords(
+            customer_df,
+            exact_names=("Record Id", "Record ID", "id", "Account Id", "Contact Id"),
+            keywords=("recordid", "accountid", "contactid", "customerid"),
+        )
+        deal_plate_col = find_column_by_keywords(
+            deals_df,
+            exact_names=("Plate Number", "Vehicle Number", "Registration Number", "Vehicle Name", "Deal Name", "Plate No"),
+            keywords=("platenumber", "plateno", "registrationnumber", "vehicleregistration", "vehiclenumber"),
+        )
+
+        # Contact fields are discovered by headings, rather than assuming Phone/Email exactly.
+        deal_phone_col = find_column_by_keywords(
+            deals_df, exact_names=("Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Phone"),
+            keywords=("phonenumber", "mobilephone", "mobilenumber", "telephone", "contactphone", "phone"),
+        )
+        cust_phone_col = find_column_by_keywords(
+            customer_df, exact_names=("Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Phone"),
+            keywords=("phonenumber", "mobilephone", "mobilenumber", "telephone", "contactphone", "phone"),
+        )
+        deal_email_col = find_column_by_keywords(
+            deals_df, exact_names=("Email", "Email Address", "Customer Email", "Contact Email"),
+            keywords=("emailaddress", "customeremail", "contactemail", "email"),
+        )
+        cust_email_col = find_column_by_keywords(
+            customer_df, exact_names=("Email", "Email Address", "Customer Email", "Contact Email"),
+            keywords=("emailaddress", "customeremail", "contactemail", "email"),
+        )
+
+        if not deal_plate_col:
+            st.warning("Could not identify the vehicle plate/registration column in the Deals export. Check the Deals CSV headers.")
         else:
-            deals_df["link_id_clean"] = deals_df[deal_link_col].fillna("").astype(str).str.strip()
-            customer_df["link_id_clean"] = customer_df[customer_link_col].fillna("").astype(str).str.strip()
-            zoho_merged = pd.merge(deals_df, customer_df, on="link_id_clean", how="left", suffixes=("_deal", "_cust"))
+            # Build contact lookup by Zoho record ID when possible. Preserve contacts directly on Deals too.
+            customer_df["_zoho_customer_id"] = customer_df[customer_link_col].fillna("").astype(str).str.strip() if customer_link_col else ""
+            deals_df["_zoho_customer_id"] = deals_df[deal_link_col].fillna("").astype(str).str.strip() if deal_link_col else ""
+
+            # Keep raw IDs as strings to avoid numeric formatting differences.
+            if customer_link_col and deal_link_col:
+                customer_df = customer_df.drop_duplicates(subset=["_zoho_customer_id"], keep="last")
+                zoho_merged = pd.merge(
+                    deals_df, customer_df, on="_zoho_customer_id", how="left", suffixes=("_deal", "_cust")
+                )
+            else:
+                zoho_merged = deals_df.copy()
+                st.warning("Zoho customer ID relationship columns were not identified; matching will use contact details present on Deals only.")
+
             expired_units = expired_total.copy()
-            expired_units["match_plate"] = expired_units["plate_number"].fillna("").astype(str).str.replace(r"[-\s]", "", regex=True).str.upper()
-            zoho_merged["match_plate"] = zoho_merged[deal_plate_col].fillna("").astype(str).str.replace(r"[-\s]", "", regex=True).str.upper()
-            expired_units = expired_units[expired_units["match_plate"] != ""]
-            zoho_merged = zoho_merged[zoho_merged["match_plate"] != ""]
-            final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner", suffixes=("_fleet", "_zoho"))
-            phone_raw = first_existing_column(final_recovery, ["Phone_cust", "Phone", "Phone_deal", "Phone Number_cust", "Phone Number", "Phone Number_deal"])
-            email_raw = first_existing_column(final_recovery, ["Email_cust", "Email", "Email_deal", "Customer Email_cust", "Customer Email", "Customer Email_deal"])
-            final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
-            final_recovery["email_clean"] = email_raw.fillna("").astype(str).str.strip().str.lower()
-            final_recovery = final_recovery.drop_duplicates(subset=["match_plate"])
-            valid_calls = final_recovery[final_recovery["phone_clean"] != ""]
-            valid_emails = final_recovery[
-                (final_recovery["email_clean"] != "") &
-                (final_recovery["email_clean"] != "nan") &
-                (~final_recovery["email_clean"].apply(is_excluded_email))
-            ]
-            st.success(f"Matched {len(final_recovery):,} expired vehicles to Zoho CRM records by plate number.")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Matched Expired Vehicles", f"{len(final_recovery):,}")
-            m2.metric("With Phone Numbers", f"{len(valid_calls):,}")
-            m3.metric("With Customer Emails", f"{len(valid_emails):,}")
-            customer_name_col = next((c for c in ["Customer Name_cust", "Account Name_cust", "Customer Name", "Account Name"] if c in final_recovery.columns), None)
-            preview_cols = [c for c in ["plate_number", "name", "expiration_date", customer_name_col, "phone_clean", "email_clean"] if c and c in final_recovery.columns]
-            st.dataframe(final_recovery[preview_cols], use_container_width=True)
-            download_cols = preview_cols or ["match_plate", "phone_clean", "email_clean"]
-            d1, d2 = st.columns(2)
-            d1.download_button("⬇️ Download expired-fleet calling list", valid_calls[download_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_calling_list.csv", "text/csv", key="dl_calling")
-            d2.download_button("⬇️ Download expired-fleet email list", valid_emails[download_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_email_list.csv", "text/csv", key="dl_emails")
+            expired_units["match_plate"] = expired_units["plate_number"].apply(normalize_plate)
+            # Deal plate field may have been suffixed if same-named columns exist.
+            merged_deal_plate = deal_plate_col if deal_plate_col in zoho_merged.columns else f"{deal_plate_col}_deal"
+            if merged_deal_plate not in zoho_merged.columns:
+                merged_deal_plate = next((c for c in zoho_merged.columns if normalized_header(c) == normalized_header(deal_plate_col)), None)
+
+            if merged_deal_plate:
+                zoho_merged["match_plate"] = zoho_merged[merged_deal_plate].apply(normalize_plate)
+                expired_units = expired_units[expired_units["match_plate"] != ""]
+                zoho_merged = zoho_merged[zoho_merged["match_plate"] != ""]
+                final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner", suffixes=("_fleet", "_zoho"))
+
+                # Pick the first non-empty phone/email across the deal and customer record.
+                phone_candidates = [
+                    f"{deal_phone_col}_deal" if deal_phone_col else "",
+                    deal_phone_col or "",
+                    f"{cust_phone_col}_cust" if cust_phone_col else "",
+                    cust_phone_col or "",
+                ]
+                email_candidates = [
+                    f"{deal_email_col}_deal" if deal_email_col else "",
+                    deal_email_col or "",
+                    f"{cust_email_col}_cust" if cust_email_col else "",
+                    cust_email_col or "",
+                ]
+                # Include likely suffix variants such as Mobile_cust, Phone_Number, and alternate Zoho headings.
+                phone_candidates += [c for c in final_recovery.columns if any(k in normalized_header(c) for k in ("phone", "mobile", "telephone"))]
+                email_candidates += [c for c in final_recovery.columns if "email" in normalized_header(c)]
+
+                def first_nonempty(row, candidates):
+                    for col in dict.fromkeys(c for c in candidates if c and c in row.index):
+                        value = row[col]
+                        try:
+                            if pd.isna(value):
+                                continue
+                        except (TypeError, ValueError):
+                            pass
+                        text_value = str(value).strip()
+                        if text_value.lower() not in ("", "nan", "none", "null"):
+                            return text_value
+                    return ""
+
+                final_recovery["phone_raw"] = final_recovery.apply(lambda row: first_nonempty(row, phone_candidates), axis=1)
+                final_recovery["phone_clean"] = final_recovery["phone_raw"].apply(normalize_number)
+                final_recovery["email_clean"] = final_recovery.apply(lambda row: first_nonempty(row, email_candidates), axis=1).astype(str).str.strip().str.lower()
+                final_recovery = final_recovery.drop_duplicates(subset=["match_plate"], keep="first")
+                valid_calls = final_recovery[final_recovery["phone_clean"].str.len() >= 10]
+                valid_emails = final_recovery[
+                    (final_recovery["email_clean"] != "") &
+                    (final_recovery["email_clean"] != "nan") &
+                    (~final_recovery["email_clean"].apply(is_excluded_email))
+                ]
+
+                st.success(f"Matched {len(final_recovery):,} expired vehicles to Zoho CRM records by normalized plate number.")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Matched Expired Vehicles", f"{len(final_recovery):,}")
+                m2.metric("With Phone Numbers", f"{len(valid_calls):,}")
+                m3.metric("With Customer Emails", f"{len(valid_emails):,}")
+                customer_name_col = next((c for c in final_recovery.columns if normalized_header(c) in {"customernamecust", "accountnamecust", "customername", "accountname", "contactname"}), None)
+                preview_cols = [c for c in ["plate_number", "name", "expiration_date", customer_name_col, "phone_raw", "phone_clean", "email_clean"] if c and c in final_recovery.columns]
+                st.dataframe(final_recovery[preview_cols], use_container_width=True, hide_index=True)
+                download_cols = preview_cols or ["match_plate", "phone_clean", "email_clean"]
+                d1, d2 = st.columns(2)
+                d1.download_button("⬇️ Download expired-fleet calling list", valid_calls[download_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_calling_list.csv", "text/csv", key="dl_calling")
+                d2.download_button("⬇️ Download expired-fleet email list", valid_emails[download_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_email_list.csv", "text/csv", key="dl_emails")
+                with st.expander("Zoho matching diagnostics"):
+                    st.write("Detected Deals plate column:", deal_plate_col)
+                    st.write("Detected Deals customer-link column:", deal_link_col or "Not found")
+                    st.write("Detected Customer ID column:", customer_link_col or "Not found")
+                    st.write("Detected Deals phone/email columns:", deal_phone_col or "Not found", "/", deal_email_col or "Not found")
+                    st.write("Detected Customer phone/email columns:", cust_phone_col or "Not found", "/", cust_email_col or "Not found")
+            else:
+                st.warning("Could not resolve the Deals vehicle plate column after loading the exports.")
     except Exception as exc:
         st.warning(f"Zoho matching could not run, but the main fleet dashboard is still available. Details: {exc}")
 else:
-    st.info("Optional Zoho exports not found. Add files named like `Deals_YYYY_MM_DD.csv` and `Customer_YYYY_MM_DD.csv` to enable CRM matching.")
+    st.info("Optional Zoho exports not found. Add files named like `Deals_YYYY_MM_DD.csv` and `Customer_YYYY_MM_DD.csv` to the repository (root or subfolder) to enable CRM matching.")
 
 # ============================================================
 # 8. Clean customer email export
@@ -459,7 +602,16 @@ st.write(f"Found **{len(airtel_30h_offline):,} verified Airtel units** offline f
 if not airtel_30h_offline.empty:
     airtel_cols = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_30h_offline.columns]
     st.dataframe(airtel_30h_offline[airtel_cols], use_container_width=True)
-    st.download_button("⬇️ Download Airtel 30h+ offline list", airtel_30h_offline[airtel_cols].to_csv(index=False).encode("utf-8"), "airtel_30h_offline_fleet.csv", "text/csv")
+    st.download_button("⬇️ Download verified Airtel 30h+ offline list", airtel_30h_offline[airtel_cols].to_csv(index=False).encode("utf-8"), "airtel_30h_offline_fleet.csv", "text/csv")
+
+# Prefix-estimated Airtel lines remain useful when a verified inventory is unavailable.
+airtel_estimated_30h = df[(df["sim_network"] == "Airtel (prefix estimate)") & (df["hours_offline"].isna() | (df["hours_offline"] >= 30))].sort_values("hours_offline", ascending=False, na_position="first")
+st.caption("Prefix-based Airtel identification is an estimate, not proof of the current carrier, because numbers may be ported.")
+st.write(f"Airtel prefix-estimated devices offline/unknown for 30+ hours: **{len(airtel_estimated_30h):,}**")
+if not airtel_estimated_30h.empty:
+    airtel_est_cols = [c for c in ["id", "name", "plate_number", "sim_number", "sim_network", "hours_offline", "expiration_date"] if c in airtel_estimated_30h.columns]
+    st.dataframe(airtel_estimated_30h[airtel_est_cols], use_container_width=True)
+    st.download_button("⬇️ Download Airtel prefix-estimated 30h+ offline list", airtel_estimated_30h[airtel_est_cols].to_csv(index=False).encode("utf-8"), "airtel_prefix_estimated_30h_offline.csv", "text/csv")
 
 st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
 d1, d2, d3, d4 = st.columns(4)
@@ -500,8 +652,6 @@ def troubleshooting_reason(row):
             reasons.append("Verified Airtel SIM offline 30h+ — check SIM status/data, signal, power and server settings")
         else:
             reasons.append("Offline 30h+ — check vehicle power, SIM/data, signal, wiring and server settings")
-    elif hours > 30:
-        reasons.append("Offline 30h+ — check ignition/power, signal and recent tracker reports")
     if not active:
         reasons.append("Device marked inactive — confirm subscription/account status")
     if row.get("days_to_expiry") is not None and not pd.isna(row.get("days_to_expiry")) and row.get("days_to_expiry") < 0:
@@ -678,7 +828,7 @@ else:
         )
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
             st.subheader("📋 AI Executive Summary")
             st.write(response.text or "The AI service returned an empty response.")
         except Exception as exc:
