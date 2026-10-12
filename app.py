@@ -293,12 +293,14 @@ c8.metric("Expiring (next 30d)", len(expiring_30d))
 
 # ==========================================
 # ==========================================
+
+# ==========================================
 # 7. Automatic Zoho CRM File Linker & Recovery Matcher
 # ==========================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
 
 deals_path = "Deals_2026_10_02.csv"
-cust_path = "Customer_2026_10_02.csv"  # Note: matches your exact repo filename
+cust_path = "Customer_2026_10_02.csv"
 
 if os.path.exists(deals_path) and os.path.exists(cust_path):
     deals_df = safe_read_file(deals_path)
