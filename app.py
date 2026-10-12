@@ -1,11 +1,10 @@
 import json
 import os
 import re
-import pandas as pd
-import requests
-
 from dotenv import load_dotenv
 from google import genai
+import pandas as pd
+import requests
 import streamlit as st
 
 # ==========================================
@@ -168,59 +167,6 @@ def safe_read_file(file_source):
         except Exception:
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
 
-# Zoho CRM API Helpers
-def get_zoho_access_token():
-    client_id = os.getenv("ZOHO_CLIENT_ID")
-    client_secret = os.getenv("ZOHO_CLIENT_SECRET")
-    refresh_token = os.getenv("ZOHO_REFRESH_TOKEN")
-    if not all([client_id, client_secret, refresh_token]):
-        return None
-    url = f"https://accounts.zoho.com/oauth/v2/token?refresh_token={refresh_token}&client_id={client_id}&client_secret={client_secret}&grant_type=refresh_token"
-    res = requests.post(url)
-    return res.json().get("access_token") if res.status_code == 200 else None
-
-def fetch_zoho_module(module_name, access_token):
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    url = f"https://www.zohoapis.com/crm/v3/{module_name}?fields=id,Email,Contact_Name,Phone,Full_Name,Account_Name"
-    res = requests.get(url, headers=headers)
-    return pd.DataFrame(res.json().get("data", [])) if res.status_code == 200 else pd.DataFrame()
-
-def render_recovery_actions(merged_df, name_col, phone_col, email_col, plate_col="plate_number", expiry_col="expiration_date"):
-    """Shows each expired customer with clickable Call and Email actions."""
-    if merged_df.empty:
-        st.info("No matched records to show actions for.")
-        return
-
-    for _, row in merged_df.iterrows():
-        name = str(row.get(name_col, "Customer"))
-        phone = str(row.get(phone_col, "")).strip()
-        email = str(row.get(email_col, "")).strip()
-        plate = str(row.get(plate_col, ""))
-        expiry = str(row.get(expiry_col, ""))
-
-        with st.expander(f"{name} — {plate} (expired {expiry})"):
-            col_a, col_b = st.columns(2)
-
-            with col_a:
-                if phone and phone.lower() != "nan":
-                    phone_clean = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
-                    st.markdown(f"📞 [Call {phone}](tel:{phone_clean})")
-                else:
-                    st.caption("No phone number on file")
-
-            with col_b:
-                if email and email.lower() != "nan" and "@" in email:
-                    subject = "Vehicle%20Subscription%20Expired%20-%20Renew%20Now"
-                    body = (
-                        f"Dear%20{name.replace(' ', '%20')}%2C%0A%0A"
-                        f"Your%20vehicle%20{plate}%20subscription%20expired%20on%20{expiry}.%0A%0A"
-                        f"Please%20renew%20to%20restore%20tracking%20service."
-                    )
-                    mailto = f"mailto:{email}?subject={subject}&body={body}"
-                    st.markdown(f"✉️ [Email {email}]({mailto})")
-                else:
-                    st.caption("No email on file")
-
 # ==========================================
 # 5. File Selection & Dataset Execution
 # ==========================================
@@ -253,9 +199,6 @@ df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
 df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
 df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
-df["expiration_year"] = df["expiration_date"].dt.year
-df["expiration_month_name"] = df["expiration_date"].dt.strftime("%B")
-
 now = pd.Timestamp.now()
 df["hours_offline"] = (now - df["last_connect_time"]).dt.total_seconds() / 3600
 df["days_to_expiry"] = (df["expiration_date"] - now).dt.total_seconds() / 86400
@@ -285,7 +228,6 @@ else:
     df["sim_network"] = "Missing"
 
 network_breakdown = df["sim_network"].value_counts()
-offline_by_network = df[df["hours_offline"] > 24]["sim_network"].value_counts()
 
 missing_sim = df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")] if "sim_number" in df.columns else df
 sim_counts = df["sim_number"].astype(str).value_counts() if "sim_number" in df.columns else pd.Series()
@@ -341,28 +283,20 @@ c7.metric("Expiring (next 24h)", len(expiring_24h))
 c8.metric("Expiring (next 30d)", len(expiring_30d))
 
 # ==========================================
-# =========================================================
-# 📞 ZOHO CRM MANUAL FILE LINKER (EXACT SCHEMA MATCHING)
-# =========================================================
+# 7. Manual Zoho CRM File Linker
+# ==========================================
 st.subheader("📞 Manual Zoho CRM File Linker")
 
-uploaded_deals = st.file_uploader(
-    "Upload Zoho Deals File (.csv / .xlsx)", type=["csv", "xlsx"]
-)
-uploaded_customers = st.file_uploader(
-    "Upload Zoho Customers File (.csv / .xlsx)", type=["csv", "xlsx"]
-)
+uploaded_deals = st.file_uploader("Upload Zoho Deals File (.csv / .xlsx)", type=["csv", "xlsx"])
+uploaded_customers = st.file_uploader("Upload Zoho Customers File (.csv / .xlsx)", type=["csv", "xlsx"])
 
 if uploaded_deals and uploaded_customers:
     deals_df = safe_read_file(uploaded_deals)
     cust_df = safe_read_file(uploaded_customers)
 
-    # Clean column spaces
     deals_df.columns = deals_df.columns.astype(str).str.strip()
     cust_df.columns = cust_df.columns.astype(str).str.strip()
 
-    # Step 1: Clean and prepare Join IDs
-    # Link Deals['Customer Name.id'] to Customers['Record Id']
     deal_link_col = "Customer Name.id" if "Customer Name.id" in deals_df.columns else "Accounts Name.id"
     cust_link_col = "Record Id" if "Record Id" in cust_df.columns else cust_df.columns[0]
 
@@ -370,58 +304,32 @@ if uploaded_deals and uploaded_customers:
         deals_df["link_id_clean"] = deals_df[deal_link_col].astype(str).str.strip()
         cust_df["link_id_clean"] = cust_df[cust_link_col].astype(str).str.strip()
 
-        # Step 2: Merge Deals with Customers on Record ID
         zoho_merged = pd.merge(
-            deals_df,
-            cust_df,
-            left_on="link_id_clean",
-            right_on="link_id_clean",
-            how="left",
-            suffixes=("_deal", "_cust")
+            deals_df, cust_df,
+            left_on="link_id_clean", right_on="link_id_clean",
+            how="left", suffixes=("_deal", "_cust")
         )
 
-        # Step 3: Match Expired Fleet Units (devices_report.csv) to Merged Zoho Records
         expired_units = df[df["days_to_expiry"] < 0].copy()
-
-        # Normalize plate numbers for match key
         expired_units["match_plate"] = (
             expired_units["plate_number"]
-            .astype(str)
-            .str.replace("-", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.upper()
+            .astype(str).str.replace("-", "", regex=False)
+            .str.replace(" ", "", regex=False).str.upper()
         )
 
-        # Detect best plate/vehicle column in Deals
         deal_plate_col = next((c for c in ["Plate Number", "Deal Name", "Vehicle Name"] if c in zoho_merged.columns), None)
 
         if deal_plate_col:
             zoho_merged["match_plate"] = (
                 zoho_merged[deal_plate_col]
-                .astype(str)
-                .str.replace("-", "", regex=False)
-                .str.replace(" ", "", regex=False)
-                .str.upper()
+                .astype(str).str.replace("-", "", regex=False)
+                .str.replace(" ", "", regex=False).str.upper()
             )
 
-            # Perform final merge
-            final_recovery = pd.merge(
-                expired_units,
-                zoho_merged,
-                on="match_plate",
-                how="inner"
-            )
+            final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner")
 
-            # Consolidate Phone and Email from both modules
-            if "Phone" in final_recovery.columns:
-                phone_raw = final_recovery["Phone"].fillna(final_recovery.get("Phone Number", ""))
-            else:
-                phone_raw = final_recovery.get("Phone Number", pd.Series([""] * len(final_recovery)))
-
-            if "Email" in final_recovery.columns:
-                email_raw = final_recovery["Email"].fillna(final_recovery.get("Customer Email", ""))
-            else:
-                email_raw = final_recovery.get("Customer Email", pd.Series([""] * len(final_recovery)))
+            phone_raw = final_recovery["Phone"] if "Phone" in final_recovery.columns else final_recovery.get("Phone Number", pd.Series([""] * len(final_recovery)))
+            email_raw = final_recovery["Email"] if "Email" in final_recovery.columns else final_recovery.get("Customer Email", pd.Series([""] * len(final_recovery)))
 
             final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
             final_recovery["email_clean"] = email_raw.astype(str).str.strip().str.lower()
@@ -429,25 +337,22 @@ if uploaded_deals and uploaded_customers:
             valid_calls = final_recovery[final_recovery["phone_clean"] != ""]
             valid_emails = final_recovery[
                 (final_recovery["email_clean"] != "") & 
-                (~final_recovery["email_clean"].isin(ADMIN_EMAILS)) &
+                (~final_recovery["email_clean"].isin(EXCLUDED_EMAILS)) &
                 (~final_recovery["email_clean"].str.contains("cartracker.ng", na=False))
             ]
 
             st.success(f"Successfully matched **{len(final_recovery):,} expired vehicles** to Zoho CRM accounts!")
 
-            # Metric Indicators
             m1, m2, m3 = st.columns(3)
             m1.metric("Matched Expired Units", f"{len(final_recovery):,}")
             m2.metric("Phone Numbers for Calling", f"{len(valid_calls):,}")
             m3.metric("Verified Recovery Emails", f"{len(valid_emails):,}")
 
-            # Display Data Preview
             cust_name_col = "Customer Name_cust" if "Customer Name_cust" in final_recovery.columns else "Customer Name"
             preview_cols = [c for c in ["plate_number", "name", "expiration_date", cust_name_col, "phone_clean", "email_clean"] if c in final_recovery.columns]
 
             st.dataframe(final_recovery[preview_cols], use_container_width=True)
 
-            # Download Export Buttons
             col_d1, col_d2 = st.columns(2)
             with col_d1:
                 st.download_button(
@@ -467,8 +372,6 @@ if uploaded_deals and uploaded_customers:
                 )
         else:
             st.error("Could not find 'Plate Number' or 'Deal Name' in the uploaded Deals file.")
-    else:
-        st.error(f"Missing required link columns: Expected '{deal_link_col}' in Deals and '{cust_link_col}' in Customers.")
 
 # ==========================================
 # 8. Clean Customer Email Campaign Exporter
@@ -487,11 +390,20 @@ st.download_button(
 )
 
 # ==========================================
-# 9. Network Analytics & Data Quality
+# 9. Network Analytics & Data Quality (Restored Table)
 # ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">📡 Network Breakdown</div>', unsafe_allow_html=True)
 st.bar_chart(network_breakdown)
+
+# Restored SIM Network Diagnosis Breakdown Table
+st.markdown('<div class="icon-header">📊 Detailed SIM Network Diagnosis</div>', unsafe_allow_html=True)
+net_df = pd.DataFrame({
+    "Network Operator": network_breakdown.index,
+    "Device Count": network_breakdown.values,
+    "Percentage (%)": (network_breakdown.values / stats["total_vehicles"] * 100).round(2)
+})
+st.dataframe(net_df, use_container_width=True, hide_index=True)
 
 st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
 d1, d2, d3, d4 = st.columns(4)
@@ -533,7 +445,7 @@ if GEMINI_API_KEY:
             + "\n\nReturn valid JSON with keys: summary, insights, actions."
         )
         response = client.models.generate_content(
-            model="gemini-3.6-flash", contents=prompt
+            model="gemini-2.5-flash", contents=prompt
         )
         raw = response.text.strip().strip("`").replace("json", "", 1).strip()
         result = json.loads(raw)
