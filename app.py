@@ -169,16 +169,8 @@ def safe_read_file(file_source):
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
 
 # ==========================================
-# 5. File Selection, Auto-Unzip & Dataset Execution
+# 5. File Selection & Dataset Execution
 # ==========================================
-for zip_name, target_csv in [("Deals_2026_10_02.zip", "Deals_2026_10_02.csv"), ("Customer_2026_10_02.zip", "Customers_2026_10_02.csv")]:
-    if os.path.exists(zip_name) and not os.path.exists(target_csv):
-        try:
-            with zipfile.ZipFile(zip_name, 'r') as zip_ref:
-                zip_ref.extractall(".")
-        except Exception:
-            pass
-
 uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
 airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
 
@@ -290,9 +282,6 @@ c5.metric("Expired (last 24h)", len(expired_24h))
 c6.metric("Expired (last 30d)", len(expired_30d))
 c7.metric("Expiring (next 24h)", len(expiring_24h))
 c8.metric("Expiring (next 30d)", len(expiring_30d))
-
-# ==========================================
-# ==========================================
 
 # ==========================================
 # 7. Automatic Zoho CRM File Linker & Recovery Matcher
