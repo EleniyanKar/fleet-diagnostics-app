@@ -292,12 +292,13 @@ c7.metric("Expiring (next 24h)", len(expiring_24h))
 c8.metric("Expiring (next 30d)", len(expiring_30d))
 
 # ==========================================
+# ==========================================
 # 7. Automatic Zoho CRM File Linker & Recovery Matcher
 # ==========================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
 
 deals_path = "Deals_2026_10_02.csv"
-cust_path = "Customers_2026_10_02.csv"
+cust_path = "Customer_2026_10_02.csv"  # Note: matches your exact repo filename
 
 if os.path.exists(deals_path) and os.path.exists(cust_path):
     deals_df = safe_read_file(deals_path)
@@ -382,7 +383,7 @@ if os.path.exists(deals_path) and os.path.exists(cust_path):
         else:
             st.error("Could not find 'Plate Number' or 'Deal Name' in the uploaded Deals file.")
 else:
-    st.info("Zoho CSV files not found in repository root. Please verify that the zip files were extracted successfully.")
+    st.info("Zoho CSV files not found in repository root. Please check file names.")
 
 # ==========================================
 # 8. Clean Customer Email Campaign Exporter
