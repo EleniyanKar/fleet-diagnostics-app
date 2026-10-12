@@ -390,7 +390,7 @@ st.download_button(
 )
 
 # ==========================================
-# 9. Network Analytics & Data Quality (Restored Table)
+# 9. Network Analytics, Data Quality & Airtel 48h Offline Report
 # ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">📡 Network Breakdown</div>', unsafe_allow_html=True)
@@ -404,6 +404,25 @@ net_df = pd.DataFrame({
     "Percentage (%)": (network_breakdown.values / stats["total_vehicles"] * 100).round(2)
 })
 st.dataframe(net_df, use_container_width=True, hide_index=True)
+
+# Airtel SIMs Offline (48h+) Report Section
+st.markdown('<div class="icon-header">📡 Airtel SIMs Offline (48h+)</div>', unsafe_allow_html=True)
+airtel_48h_offline = df[
+    (df["sim_network"].str.contains("Airtel", case=False, na=False)) & 
+    (df["hours_offline"] >= 48)
+].sort_values("hours_offline", ascending=False)
+
+st.write(f"Found **{len(airtel_48h_offline):,} Airtel units** offline for 48 hours or more.")
+if not airtel_48h_offline.empty:
+    preview_cols_airtel = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_48h_offline.columns]
+    st.dataframe(airtel_48h_offline[preview_cols_airtel], use_container_width=True)
+    st.download_button(
+        "⬇️ Download Airtel 48h Offline List (CSV)",
+        airtel_48h_offline[preview_cols_airtel].to_csv(index=False),
+        "airtel_48h_offline_fleet.csv",
+        "text/csv",
+        key="dl_btn_airtel_48h"
+    )
 
 st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
 d1, d2, d3, d4 = st.columns(4)
@@ -431,7 +450,7 @@ st.download_button(
 )
 
 # ==========================================
-# 11. AI Intelligence via Gemini API
+# 11. AI Intelligence via Gemini API (Fixed Model Endpoint)
 # ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">🤖 AI Fleet Intelligence</div>', unsafe_allow_html=True)
