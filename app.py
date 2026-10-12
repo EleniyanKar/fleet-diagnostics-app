@@ -1,7 +1,7 @@
 import json
 import os
 import re
-import zipfile
+import glob
 from dotenv import load_dotenv
 from google import genai
 import pandas as pd
@@ -168,6 +168,16 @@ def safe_read_file(file_source):
         except Exception:
             return pd.read_csv(file_source, encoding="latin1", dtype=str)
 
+def first_existing_col(dataframe, candidates):
+    """Return the first matching column as a Series, trying each candidate
+    name in order. Handles pandas merge suffixes (_deal, _cust, etc.) so a
+    merged dataframe doesn't silently return blank data when the original
+    unsuffixed column name no longer exists after the merge."""
+    for c in candidates:
+        if c in dataframe.columns:
+            return dataframe[c]
+    return pd.Series([""] * len(dataframe), index=dataframe.index)
+
 # ==========================================
 # 5. File Selection & Dataset Execution
 # ==========================================
@@ -288,10 +298,16 @@ c8.metric("Expiring (next 30d)", len(expiring_30d))
 # ==========================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
 
-deals_path = "Deals_2026_10_02.csv"
-cust_path = "Customer_2026_10_02.csv"
+# Pick the most recently exported Deals/Customer CSVs automatically,
+# instead of a hardcoded date, so this keeps working on future exports.
+deals_candidates = sorted(glob.glob("Deals_*.csv"), reverse=True)
+cust_candidates = sorted(glob.glob("Customer_*.csv"), reverse=True)
+deals_path = deals_candidates[0] if deals_candidates else None
+cust_path = cust_candidates[0] if cust_candidates else None
 
-if os.path.exists(deals_path) and os.path.exists(cust_path):
+if deals_path and cust_path:
+    st.caption(f"Using Zoho export files: `{deals_path}` and `{cust_path}`")
+
     deals_df = safe_read_file(deals_path)
     cust_df = safe_read_file(cust_path)
 
@@ -329,15 +345,25 @@ if os.path.exists(deals_path) and os.path.exists(cust_path):
 
             final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner")
 
-            phone_raw = final_recovery["Phone"] if "Phone" in final_recovery.columns else final_recovery.get("Phone Number", pd.Series([""] * len(final_recovery)))
-            email_raw = final_recovery["Email"] if "Email" in final_recovery.columns else final_recovery.get("Customer Email", pd.Series([""] * len(final_recovery)))
+            # Check every likely column name, including merge suffixes,
+            # so matches aren't silently lost when both source files
+            # share a column name like "Phone" or "Email".
+            phone_raw = first_existing_col(
+                final_recovery,
+                ["Phone", "Phone_cust", "Phone_deal", "Phone Number", "Phone Number_cust", "Phone Number_deal"],
+            )
+            email_raw = first_existing_col(
+                final_recovery,
+                ["Email", "Email_cust", "Email_deal", "Customer Email", "Customer Email_cust", "Customer Email_deal"],
+            )
 
             final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
             final_recovery["email_clean"] = email_raw.astype(str).str.strip().str.lower()
 
             valid_calls = final_recovery[final_recovery["phone_clean"] != ""]
             valid_emails = final_recovery[
-                (final_recovery["email_clean"] != "") & 
+                (final_recovery["email_clean"] != "") &
+                (final_recovery["email_clean"] != "nan") &
                 (~final_recovery["email_clean"].isin(EXCLUDED_EMAILS)) &
                 (~final_recovery["email_clean"].str.contains("cartracker.ng", na=False))
             ]
@@ -373,8 +399,10 @@ if os.path.exists(deals_path) and os.path.exists(cust_path):
                 )
         else:
             st.error("Could not find 'Plate Number' or 'Deal Name' in the uploaded Deals file.")
+    else:
+        st.error(f"Could not find a link column. Looked for '{deal_link_col}' in Deals and '{cust_link_col}' in Customer file.")
 else:
-    st.info("Zoho CSV files not found in repository root. Please check file names.")
+    st.info("No Zoho export files found in repository root (expected files named like `Deals_YYYY_MM_DD.csv` and `Customer_YYYY_MM_DD.csv`).")
 
 # ==========================================
 # 8. Clean Customer Email Campaign Exporter
@@ -408,12 +436,15 @@ net_df = pd.DataFrame({
 st.dataframe(net_df, use_container_width=True, hide_index=True)
 
 st.markdown('<div class="icon-header">📡 Airtel SIMs Offline (48h+)</div>', unsafe_allow_html=True)
+# Verified-only match, since contacting a customer based on a guessed
+# network (rather than the confirmed Airtel list) risks acting on a
+# wrong assumption.
 airtel_48h_offline = df[
-    (df["sim_network"].str.contains("Airtel", case=False, na=False)) & 
+    (df["sim_network"] == "Airtel (verified)") &
     (df["hours_offline"] >= 48)
 ].sort_values("hours_offline", ascending=False)
 
-st.write(f"Found **{len(airtel_48h_offline):,} Airtel units** offline for 48 hours or more.")
+st.write(f"Found **{len(airtel_48h_offline):,} verified Airtel units** offline for 48 hours or more.")
 if not airtel_48h_offline.empty:
     preview_cols_airtel = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_48h_offline.columns]
     st.dataframe(airtel_48h_offline[preview_cols_airtel], use_container_width=True)
