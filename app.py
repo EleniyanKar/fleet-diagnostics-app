@@ -103,6 +103,14 @@ def extract_emails(value):
     return result
 
 
+def format_phone_display(value):
+    """Return a Nigerian mobile number in readable national format when possible."""
+    normalized = normalize_number(value)
+    if len(normalized) == 10:
+        return "0" + normalized
+    return normalized
+
+
 def valid_imei(value):
     s = normalize_text(value)
     if s.endswith(".0"):
@@ -293,6 +301,39 @@ network_breakdown = df["sim_network"].value_counts()
 airtel_offline = df[(df["sim_network"] == "Airtel (verified)") & (df["last_connect_time"].isna() | (df["hours_offline"] >= REPORTING_HOURS))].copy()
 airtel_offline = airtel_offline.sort_values("hours_offline", ascending=False, na_position="first")
 
+# -------------------- Phase 1: data quality and source reconciliation --------------------
+st.divider()
+st.subheader("🧾 Data Quality & Source Reconciliation")
+missing_required = [c for c in ["id", "name", "imei", "sim_number", "plate_number", "active", "last_connect_time", "expiration_date"] if c not in df.columns]
+missing_last_report = int(df["last_connect_time"].isna().sum())
+missing_expiry = int(df["expiration_date"].isna().sum())
+missing_plate = int(df["plate_number"].astype(str).str.strip().isin(["", "nan", "None"]).sum())
+duplicate_device_ids = int(df["id"].astype(str).duplicated(keep=False).sum()) if "id" in df.columns else 0
+duplicate_imeis_valid = int(len(duplicate_imei_rows))
+invalid_expiry = int(df["expiration_date"].isna().sum())
+quality_items = [
+    {"Check": "Fleet records loaded", "Result": f"{len(df):,}", "Status": "INFO"},
+    {"Check": "Missing required columns", "Result": ", ".join(missing_required) if missing_required else "None", "Status": "WARNING" if missing_required else "PASS"},
+    {"Check": "Missing last-report timestamps", "Result": f"{missing_last_report:,}", "Status": "WARNING" if missing_last_report else "PASS"},
+    {"Check": "Missing/invalid expiry dates", "Result": f"{missing_expiry:,}", "Status": "WARNING" if missing_expiry else "PASS"},
+    {"Check": "Missing vehicle plate/registration", "Result": f"{missing_plate:,}", "Status": "WARNING" if missing_plate else "PASS"},
+    {"Check": "Rows with duplicate device IDs", "Result": f"{duplicate_device_ids:,}", "Status": "WARNING" if duplicate_device_ids else "PASS"},
+    {"Check": "Rows with duplicate SIMs", "Result": f"{len(duplicate_sim_rows):,}", "Status": "WARNING" if len(duplicate_sim_rows) else "PASS"},
+    {"Check": "Rows with duplicate valid IMEIs", "Result": f"{duplicate_imeis_valid:,}", "Status": "WARNING" if duplicate_imeis_valid else "PASS"},
+]
+st.dataframe(pd.DataFrame(quality_items), use_container_width=True, hide_index=True)
+st.info("GPSWOX reconciliation is based on the committed fleet export in this app. This version does not call the live GPSWOX API, so it cannot independently confirm the current live admin count. Compare the loaded record count with the same-time GPSWOX export/admin count before treating it as reconciled.")
+with st.expander("How to reconcile against GPSWOX"):
+    st.markdown(f"""
+    - **Repository fleet export:** {len(df):,} rows from `{fleet_path.relative_to(ROOT)}`.
+    - **Reporting within {REPORTING_HOURS} hours:** {len(reporting):,}.
+    - **Older than {REPORTING_HOURS} hours or no timestamp:** {len(not_reporting):,}.
+    - **Expired by the export's expiry date:** {len(expired):,}.
+    - **Duplicate device IDs (rows involved):** {duplicate_device_ids:,}.
+
+    These values describe the committed file, not a live API query. For a fair comparison, export the same device scope from GPSWOX at approximately the same time and compare record counts, device IDs and expiry definitions.
+    """)
+
 # -------------------- KPI dashboard --------------------
 st.success("Analysis complete")
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -329,17 +370,33 @@ if deals_path and customers_path:
         customer_id = find_col(customers, ["Record Id", "Record ID", "id", "Customer ID", "Account ID"])
         deal_plate = find_col(deals, ["Plate Number", "Vehicle Plate Number", "Registration Number", "Vehicle Registration", "Deal Name", "Vehicle Name", "Name"])
         fleet_plate = find_col(df, ["plate_number", "registration_number", "name"])
-        customer_phone = find_col(customers, ["Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Number", "Mobile Phone", "Other Phone"])
-        customer_email = find_col(customers, ["Email", "Email Address", "Primary Email", "Customer Email", "E-mail"])
-        deal_phone = find_col(deals, ["Phone", "Phone Number", "Mobile", "Mobile Number", "Contact Number"])
-        deal_email = find_col(deals, ["Email", "Email Address", "Customer Email", "E-mail"])
+        customer_phone = find_col(customers, [
+            "Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Number",
+            "Mobile Phone", "Other Phone", "Home Phone", "Work Phone", "Primary Phone",
+            "WhatsApp Number", "WhatsApp", "Phone No", "Contact Phone", "Cell Phone",
+        ])
+        customer_email = find_col(customers, ["Email", "Email Address", "Primary Email", "Customer Email", "E-mail", "Email ID"])
+        deal_phone = find_col(deals, [
+            "Phone", "Phone Number", "Mobile", "Mobile Number", "Contact Number", "Telephone",
+            "Mobile Phone", "WhatsApp Number", "Phone No", "Contact Phone",
+        ])
+        deal_email = find_col(deals, ["Email", "Email Address", "Customer Email", "E-mail", "Email ID"])
 
         # Join Deals to Customers using Zoho IDs if available; don't silently join on the wrong columns.
         if deal_link and customer_id:
             deals["_join_id"] = deals[deal_link].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
             customers["_join_id"] = customers[customer_id].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            zoho_merged = pd.merge(deals, customers, on="_join_id", how="left", suffixes=("_deal", "_cust"))
+            deals.loc[deals["_join_id"].str.lower().isin(["", "nan", "none", "null"]), "_join_id"] = ""
+            customers.loc[customers["_join_id"].str.lower().isin(["", "nan", "none", "null"]), "_join_id"] = ""
+            # Remove blank keys before merging; blank-to-blank joins create false matches.
+            deals_valid = deals[deals["_join_id"] != ""].copy()
+            customers_valid = customers[customers["_join_id"] != ""].copy()
+            zoho_merged = pd.merge(deals_valid, customers_valid, on="_join_id", how="left", suffixes=("_deal", "_cust"), indicator=True)
             zoho_diagnostics["Join method"] = f"Zoho ID: Deals `{deal_link}` → Customers `{customer_id}`"
+            zoho_diagnostics["Deals with usable customer IDs"] = int((deals["_join_id"] != "").sum())
+            zoho_diagnostics["Deals linked to a customer record"] = int((zoho_merged["_merge"] == "both").sum())
+            zoho_diagnostics["Deals with unmatched customer IDs"] = int((zoho_merged["_merge"] == "left_only").sum())
+            zoho_merged = zoho_merged.drop(columns=["_merge"])
         else:
             zoho_merged = deals.copy()
             zoho_diagnostics["Join method"] = "No reliable customer ID relationship detected; deal-only contact details will be used."
@@ -350,6 +407,9 @@ if deals_path and customers_path:
         zoho_diagnostics["Customer email column"] = customer_email or "Not detected"
         zoho_diagnostics["Deal phone column"] = deal_phone or "Not detected"
         zoho_diagnostics["Deal email column"] = deal_email or "Not detected"
+        zoho_diagnostics["Deal ID column"] = find_col(deals, ["Record Id", "Record ID", "id", "Deal ID", "Deal Id"]) or "Not detected"
+        zoho_diagnostics["Customer ID column"] = customer_id or "Not detected"
+        zoho_diagnostics["Deal plate values present"] = int(deals[deal_plate].apply(normalize_plate).ne("").sum()) if deal_plate else 0
 
         if deal_plate and fleet_plate:
             zoho_merged["_match_plate"] = zoho_merged[deal_plate].apply(normalize_plate)
@@ -373,36 +433,45 @@ if deals_path and customers_path:
                 return pd.Series([""] * len(frame), index=frame.index)
 
             phone_candidates = [
-                "Phone_cust", "Phone Number_cust", "Mobile_cust", "Mobile Number_cust",
-                "Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone",
-                "Contact Number", "Phone_deal", "Phone Number_deal", "Mobile_deal",
+                "Phone_cust", "Phone Number_cust", "Mobile_cust", "Mobile Number_cust", "Telephone_cust",
+                "Contact Number_cust", "Mobile Phone_cust", "Other Phone_cust", "WhatsApp Number_cust",
+                "Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Number",
+                "Mobile Phone", "Other Phone", "Home Phone", "Work Phone", "Primary Phone", "WhatsApp Number",
+                "Phone_deal", "Phone Number_deal", "Mobile_deal", "Mobile Number_deal", "Telephone_deal",
+                "Contact Number_deal", "Mobile Phone_deal", "WhatsApp Number_deal",
             ]
             email_candidates = [
-                "Email_cust", "Email Address_cust", "Primary Email_cust", "Customer Email_cust",
-                "Email", "Email Address", "Primary Email", "Customer Email", "E-mail",
-                "Email_deal", "Email Address_deal", "Customer Email_deal",
+                "Email_cust", "Email Address_cust", "Primary Email_cust", "Customer Email_cust", "E-mail_cust",
+                "Email", "Email Address", "Primary Email", "Customer Email", "E-mail", "Email ID",
+                "Email_deal", "Email Address_deal", "Customer Email_deal", "E-mail_deal",
             ]
-            # Exact column search first; explicitly use suffix columns if merge generated them.
             phone_raw = pick_series(final_recovery, phone_candidates)
             email_raw = pick_series(final_recovery, email_candidates)
-            final_recovery["customer_phone"] = phone_raw.apply(normalize_number)
+            final_recovery["customer_phone_norm"] = phone_raw.apply(normalize_number)
+            final_recovery["customer_phone"] = phone_raw.apply(format_phone_display)
             final_recovery["customer_emails"] = email_raw.apply(lambda v: ", ".join(extract_emails(v)))
-            # If the linked customer export didn't supply contacts, retain deal-level contact values.
-            for col in ["Phone_deal", "Phone Number_deal", "Mobile_deal", "Mobile Number_deal"]:
+            # Try each available contact column in priority order, filling only blanks.
+            for col in phone_candidates:
                 if col in final_recovery.columns:
-                    mask = final_recovery["customer_phone"].eq("")
-                    final_recovery.loc[mask, "customer_phone"] = final_recovery.loc[mask, col].apply(normalize_number)
-            for col in ["Email_deal", "Email Address_deal", "Customer Email_deal"]:
+                    mask = final_recovery["customer_phone_norm"].eq("")
+                    raw = final_recovery[col]
+                    final_recovery.loc[mask, "customer_phone_norm"] = raw[mask].apply(normalize_number)
+                    final_recovery.loc[mask, "customer_phone"] = raw[mask].apply(format_phone_display)
+            for col in email_candidates:
                 if col in final_recovery.columns:
                     mask = final_recovery["customer_emails"].eq("")
                     final_recovery.loc[mask, "customer_emails"] = final_recovery.loc[mask, col].apply(lambda v: ", ".join(extract_emails(v)))
 
             final_recovery = final_recovery.drop_duplicates(subset=["id", "_match_plate"] if "id" in final_recovery.columns else ["_match_plate"])
-            calls = final_recovery[final_recovery["customer_phone"] != ""]
+            calls = final_recovery[final_recovery["customer_phone_norm"] != ""]
             recovery_emails = final_recovery[final_recovery["customer_emails"] != ""]
             zoho_diagnostics["Plate matches"] = len(final_recovery)
             zoho_diagnostics["Matches with phone"] = len(calls)
             zoho_diagnostics["Matches with email"] = len(recovery_emails)
+            zoho_diagnostics["Expired fleet rows eligible for plate match"] = int((df["days_to_expiry"] < 0).sum())
+            zoho_diagnostics["Expired fleet rows with a plate"] = int(((df["days_to_expiry"] < 0) & df[fleet_plate].apply(normalize_plate).ne("")).sum())
+            zoho_diagnostics["Matched expired units without phone"] = int((final_recovery["customer_phone_norm"] == "").sum())
+            zoho_diagnostics["Matched expired units without email"] = int((final_recovery["customer_emails"] == "").sum())
 
             a, b, c = st.columns(3)
             a.metric("Matched expired vehicles", f"{len(final_recovery):,}")
@@ -450,7 +519,10 @@ network_table = pd.DataFrame({
     "Percentage (%)": (network_breakdown.values / max(len(df), 1) * 100).round(2),
 })
 st.dataframe(network_table, use_container_width=True, hide_index=True)
-st.caption("Prefix-based classifications are estimates. Only an exact normalized match in the Airtel inventory is marked verified.")
+st.caption("Prefix-based classifications are estimates. Only an exact normalized match in the Airtel inventory is marked verified. Nigerian mobile number portability means prefix alone cannot prove the current network.")
+if airtel_path:
+    fleet_airtel_exact = int(df["sim_number_norm"].isin(airtel_numbers).sum())
+    st.caption(f"Airtel cross-check: {len(airtel_numbers):,} unique normalized inventory numbers; {fleet_airtel_exact:,} fleet SIM records match that inventory exactly. This is a file-to-file match, not a live SIM status check.")
 
 st.subheader(f"📡 Verified Airtel SIMs offline for {REPORTING_HOURS}+ hours")
 st.write(f"Found **{len(airtel_offline):,} verified Airtel devices** with no report in the last {REPORTING_HOURS} hours.")
@@ -539,6 +611,12 @@ with st.expander("📚 Data sources, definitions & references"):
     - Fleet report: `{fleet_path.relative_to(ROOT)}` from the GitHub repository.
     - Airtel inventory: `{airtel_path.relative_to(ROOT) if airtel_path else 'Not found'}`.
     - Zoho exports: Deals and Customer/Customers/Accounts files discovered in the repository.
+
+    **Reconciliation scope**
+    - This app reads repository snapshots; it does not currently query GPSWOX or Zoho live APIs.
+    - GPSWOX counts can differ if the export and admin page use different filters, device scopes, or export times.
+    - Zoho recovery results require both a normalized plate match and a linked customer record; unmatched IDs and absent contact fields are surfaced in diagnostics.
+    - Phone numbers are normalized for matching and displayed in national format where possible; verify records before contacting customers.
 
     **Definitions**
     - Reporting: a valid `last_connect_time` within the last {REPORTING_HOURS} hours.
