@@ -93,7 +93,14 @@ PREFIX_TO_NETWORK = {p: net for net, prefixes in NETWORK_PREFIXES.items() for p 
 # 4. Helper & Data Parsing Functions
 # ==========================================
 def normalize_number(n):
-    if pd.isna(n) or str(n).strip().lower() in ("", "nan", "null", "none"):
+    if n is None:
+        return ""
+    try:
+        if pd.isna(n):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if str(n).strip().lower() in ("", "nan", "null", "none"):
         return ""
     s = str(n).strip()
     if s.endswith(".0"):
@@ -181,30 +188,60 @@ def first_existing_col(dataframe, candidates):
 # ==========================================
 # 5. File Selection & Dataset Execution
 # ==========================================
-uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
-airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
-
+# Data files are read from the repository; no upload widgets are required.
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FILES = ["devices_report.csv.csv", "devices_report_1789914045.csv", "devices_report.csv"]
-default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.getsize(f) > 0), None)
+default_path = next(
+    (os.path.join(REPO_DIR, name) for name in DEFAULT_FILES
+     if os.path.isfile(os.path.join(REPO_DIR, name)) and os.path.getsize(os.path.join(REPO_DIR, name)) > 0),
+    None,
+)
 
+# Automatically load the Airtel inventory from a CSV in the repository, if present.
 airtel_numbers = set()
-if airtel_file is not None:
-    airtel_df = safe_read_file(airtel_file)
-    airtel_df.columns = airtel_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
-    msisdn_col = next((col for col in airtel_df.columns if col.lower() in ["msisdn", "phone", "sim", "sim_number", "mobile"]), None)
-    if msisdn_col:
-        airtel_numbers = set(airtel_df[msisdn_col].apply(normalize_number))
-        airtel_numbers.discard("")
+airtel_candidates = sorted(glob.glob(os.path.join(REPO_DIR, "*airtel*.csv")))
+if airtel_candidates:
+    try:
+        airtel_df = safe_read_file(airtel_candidates[0])
+        airtel_df.columns = airtel_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+        msisdn_col = next((col for col in airtel_df.columns if col.lower() in ["msisdn", "phone", "sim", "sim_number", "sim_num", "mobile"]), None)
+        if msisdn_col:
+            airtel_numbers = set(airtel_df[msisdn_col].apply(normalize_number))
+            airtel_numbers.discard("")
+    except Exception as exc:
+        st.warning(f"Airtel inventory could not be read: {exc}")
 
-if uploaded_file is not None:
-    df = safe_read_file(uploaded_file)
-elif default_path:
+if default_path:
     df = safe_read_file(default_path)
 else:
-    st.warning("No fleet dataset found. Please upload a CSV or Excel report.")
+    st.error("No fleet dataset was found in the GitHub repository. Add devices_report.csv (or one of the supported report filenames) to the repository root.")
     st.stop()
 
 df.columns = df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+
+# Standardise known export variants before the rest of the dashboard uses them.
+COLUMN_ALIASES = {
+    "sim_number": ["sim_number", "sim_num", "Sim Number", "SIM Number"],
+    "imei": ["imei", "IMEI", "Imei"],
+    "plate_number": ["plate_number", "registration_number", "Plate Number", "Registration Number"],
+    "name": ["name", "Vehicle Name", "vehicle_name"],
+    "device_model": ["device_model", "Device Model", "Vehicle Model", "model"],
+    "created_at": ["created_at", "Created At", "created time"],
+    "last_connect_time": ["last_connect_time", "Last Connection", "last connection", "last_connect"],
+    "expiration_date": ["expiration_date", "Expiration Date", "expiry_date", "Expiry Date"],
+    "active": ["active", "Active"],
+    "id": ["id", "ID", "device_id"],
+}
+for standard_name, aliases in COLUMN_ALIASES.items():
+    if standard_name not in df.columns:
+        found = next((col for col in aliases if col in df.columns), None)
+        if found is not None:
+            df[standard_name] = df[found]
+
+# Keep the dashboard alive when optional fields are absent from an export.
+for col in ["id", "name", "plate_number", "sim_number", "imei", "device_model", "created_at", "last_connect_time", "expiration_date", "active", "users_list"]:
+    if col not in df.columns:
+        df[col] = ""
 
 df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
 df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
@@ -527,7 +564,7 @@ if st.button("Search IMEI", key="imei_vehicle_lookup_button", type="primary"):
                 if not customer_email and deal_match is not None:
                     customer_email = _lookup_text(deal_match, ["Email", "Customer Email"])
 
-                for idx, vehicle in matches.iterrows():
+                for result_number, (idx, vehicle) in enumerate(matches.iterrows(), start=1):
                     vehicle_name = _lookup_text(vehicle, ["name", "Vehicle Name", "Vehicle Model", "device_model"])
                     vehicle_model = _lookup_text(vehicle, ["device_model", "Vehicle Model", "Vehicle Name"])
                     plate = _lookup_text(vehicle, ["plate_number", "registration_number", "Plate Number", "Registration Number"])
@@ -551,7 +588,7 @@ if st.button("Search IMEI", key="imei_vehicle_lookup_button", type="primary"):
                     else:
                         reporting_status = "Last connection unavailable"
 
-                    st.markdown(f"#### Vehicle result {idx + 1 if isinstance(idx, int) else ''}".strip())
+                    st.markdown(f"#### Vehicle result {result_number}")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("IMEI", lookup_digits)
                     c2.metric("Plate Number", plate or "Not available")
@@ -653,7 +690,8 @@ d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
 st.write("---")
 st.markdown('<div class="icon-header">💰 Renewal Opportunities</div>', unsafe_allow_html=True)
 st.write(f"Found **{len(renewal_opportunity):,} vehicles** ready for renewal.")
-st.dataframe(renewal_opportunity[["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date"]], use_container_width=True)
+renewal_columns = [c for c in ["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date"] if c in renewal_opportunity.columns]
+st.dataframe(renewal_opportunity[renewal_columns], use_container_width=True)
 
 st.markdown('<div class="icon-header">⚠️ Expired Vehicles List (All Units)</div>', unsafe_allow_html=True)
 expired_df = df[df["days_to_expiry"] < 0]
