@@ -1,47 +1,86 @@
+import json
 import os
 import re
-import json
 import glob
-from pathlib import Path
-
-import pandas as pd
-import streamlit as st
 from dotenv import load_dotenv
+from google import genai
+import pandas as pd
+import requests
+import streamlit as st
 
-try:
-    from google import genai
-except Exception:
-    genai = None
-
+# ==========================================
+# 1. Page Configuration & Modern Styling
+# ==========================================
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-st.set_page_config(page_title="AI Fleet Diagnostics Dashboard", page_icon="⚡", layout="wide")
-st.title("⚡ AI Fleet Diagnostics Dashboard")
-st.caption("Fleet diagnostics, subscription renewal opportunities, SIM analytics and customer recovery.")
+st.set_page_config(
+    page_title="AI Fleet Diagnostics Dashboard", page_icon="⚡", layout="wide"
+)
 
-REPORTING_HOURS = 30
-ROOT = Path(__file__).resolve().parent
+st.markdown(
+    """
+    <style>
+    @keyframes gradientText {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    .modern-title {
+        font-size: 2.3rem;
+        font-weight: 800;
+        background: linear-gradient(-45deg, #2563eb, #3b82f6, #06b6d4, #10b981);
+        background-size: 300% 300%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: gradientText 6s ease infinite;
+        margin-bottom: 0px;
+    }
+    .modern-subtitle {
+        font-size: 1rem;
+        color: #64748b;
+        margin-bottom: 25px;
+    }
+    .icon-header {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin-top: 20px;
+        margin-bottom: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+st.markdown('<p class="modern-title">⚡ AI Fleet Diagnostics Dashboard</p>', unsafe_allow_html=True)
+st.markdown('<p class="modern-subtitle">Live fleet diagnostics, subscription renewal opportunities, and network analytics.</p>', unsafe_allow_html=True)
+
+# ==========================================
+# 2. Administrative & Blacklisted Emails
+# ==========================================
 EXCLUDED_EMAILS = {
     "hello@cartracker.com.ng", "oluwafemi.a@cartracker.com", "ayo.a@cartracker.com",
     "inyang@cartracker.com", "rukayat@cartracker.com.ng", "temitayo.o@cartracker.com",
-    "gideon.onyebuchi@cartracker.com", "oyindaabegunde@yahoo.com",
-    "abasifrekeekanem1@cartracker.com", "andrew@cartracker.com.ng",
-    "ifeoluwa@cartracker.ng", "james@cartracker.com.org",
-    "blessing@catracker.com.ng", "damilola@catracker.com.ng",
-    "dammylola@catracker.com.ng", "blessing@catracker.ng",
-    "dammylola@catracker.ng", "10device@cartracker.com.ng",
-    "ag@cartracker.com.ng", "joyvivian111@gmail.com",
-    "ehonreoluwaseun@icloud.com", "obinnaezenwa@gmail.com",
-    "frankcay12345@yahoo.com", "access@hopmobiletransport.com",
+    "gideon.onyebuchi@cartracker.com", "oyindaabegunde@yahoo.com", "abasifrekeekanem1@cartracker.com",
+    "andrew@cartracker.com.ng", "ifeoluwa@cartracker.ng", "james@cartracker.com.org",
+    "blessing@catracker.com.ng", "damilola@catracker.com.ng", "dammylola@catracker.com.ng",
+    "blessing@catracker.ng", "dammylola@catracker.ng", "10device@cartracker.com.ng",
+    "ag@cartracker.com.ng", "joyvivian111@gmail.com", "ehonreoluwaseun@icloud.com",
+    "obinnaezenwa@gmail.com", "frankcay12345@yahoo.com", "access@hopmobiletransport.com",
     "adadioma@gmail.com", "balogunisiaka38@gmail.com", "gbaguje@yahoo.com",
-    "akeemakinwale26@gmail.com", "rhemzy82@gmail.com",
-    "muibihammedaliu@gmail.com", "faruqafolabi05@gmail.com",
-    "chuklexy@gmail.com", "uokigbo@gmail.com", "ballingtonlogistics@gmail.com",
+    "akeemakinwale26@gmail.com", "rhemzy82@gmail.com", "muibihammedaliu@gmail.com",
+    "faruqafolabi05@gmail.com", "chuklexy@gmail.com", "uokigbo@gmail.com",
+    "ballingtonlogistics@gmail.com",
 }
-EXCLUDED_KEYWORDS = ["cartracker", "catracker", "clicktgi", "gbovo", "hopmobiletransport.com"]
 
+EXCLUDED_KEYWORDS = [
+    "cartracker", "catracker", "clicktgi", "gbovo", "hopmobiletransport.com",
+]
+
+# ==========================================
+# 3. Telecom Network Prefixes (Nigeria)
+# ==========================================
 NETWORK_PREFIXES = {
     "MTN": ["0803", "0806", "0703", "0706", "0813", "0816", "0810", "0814", "0903", "0906", "0913", "0916", "0704"],
     "Airtel": ["0802", "0808", "0708", "0812", "0701", "0902", "0901", "0904", "0907", "0912", "0911", "0702"],
@@ -50,620 +89,611 @@ NETWORK_PREFIXES = {
 }
 PREFIX_TO_NETWORK = {p: net for net, prefixes in NETWORK_PREFIXES.items() for p in prefixes}
 
-
-def is_missing(value):
-    if value is None:
-        return True
-    if isinstance(value, (list, tuple, set, dict)):
-        return len(value) == 0
-    try:
-        result = pd.isna(value)
-        return bool(result) if not hasattr(result, "__len__") else False
-    except (TypeError, ValueError):
-        return False
-
-
-def normalize_text(value):
-    if is_missing(value):
+# ==========================================
+# 4. Helper & Data Parsing Functions
+# ==========================================
+def normalize_number(n):
+    if pd.isna(n) or str(n).strip().lower() in ("", "nan", "null", "none"):
         return ""
-    return str(value).strip()
-
-
-def normalize_number(value):
-    if is_missing(value):
-        return ""
-    s = str(value).strip()
-    if s.lower() in {"", "nan", "null", "none", "n/a"}:
-        return ""
+    s = str(n).strip()
     if s.endswith(".0"):
         s = s[:-2]
+    elif s.endswith(".00"):
+        s = s[:-3]
     digits = "".join(ch for ch in s if ch.isdigit())
-    if digits.startswith("234") and len(digits) >= 13:
+    if digits.startswith("234"):
         digits = digits[3:]
-    if digits.startswith("0") and len(digits) >= 11:
+    if digits.startswith("0"):
         digits = digits[1:]
     if len(digits) > 10:
         digits = digits[-10:]
     return digits
 
-
-def extract_emails(value):
-    if is_missing(value):
-        return []
-    if isinstance(value, (list, tuple, set)):
-        text = " ".join(str(x) for x in value if not is_missing(x))
-    else:
-        text = str(value)
-    found = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
-    result = []
-    for email in found:
-        e = email.strip().lower()
-        if e not in EXCLUDED_EMAILS and not any(k in e for k in EXCLUDED_KEYWORDS):
-            result.append(e)
-    return result
-
-
-def format_phone_display(value):
-    """Return a Nigerian mobile number in readable national format when possible."""
-    normalized = normalize_number(value)
-    if len(normalized) == 10:
-        return "0" + normalized
-    return normalized
-
-
-def valid_imei(value):
-    s = normalize_text(value)
-    if s.endswith(".0"):
-        s = s[:-2]
-    return s.isdigit() and len(s) == 15
-
-
-def clean_columns(frame):
-    frame = frame.copy()
-    frame.columns = [str(c).replace("\ufeff", "").strip() for c in frame.columns]
-    return frame
-
-
-def read_data(path):
-    suffix = Path(path).suffix.lower()
-    if suffix in {".xlsx", ".xls"}:
-        return clean_columns(pd.read_excel(path, dtype=str))
-    try:
-        return clean_columns(pd.read_csv(path, dtype=str, encoding="utf-8-sig", low_memory=False))
-    except Exception:
-        return clean_columns(pd.read_csv(path, dtype=str, encoding="latin1", low_memory=False))
-
-
-def find_file(patterns, exclude=None):
-    exclude = set(exclude or [])
-    candidates = []
-    for pattern in patterns:
-        candidates.extend(ROOT.glob(pattern))
-        candidates.extend(ROOT.glob(f"**/{pattern}"))
-    candidates = [p for p in set(candidates) if p.is_file() and p not in exclude and p.stat().st_size > 0]
-    # Prefer root-level and then latest modified.
-    candidates.sort(key=lambda p: (len(p.relative_to(ROOT).parts), -p.stat().st_mtime, p.name.lower()))
-    return candidates[0] if candidates else None
-
-
-def find_col(frame, candidates):
-    lowered = {str(c).strip().lower(): c for c in frame.columns}
-    for candidate in candidates:
-        if candidate.lower() in lowered:
-            return lowered[candidate.lower()]
-    # fallback: normalised names
-    def norm(s):
-        return re.sub(r"[^a-z0-9]", "", str(s).lower())
-    norm_cols = {norm(c): c for c in frame.columns}
-    for candidate in candidates:
-        if norm(candidate) in norm_cols:
-            return norm_cols[norm(candidate)]
-    return None
-
-
-def normalize_plate(value):
-    return re.sub(r"[^A-Z0-9]", "", normalize_text(value).upper())
-
-
-def network_for_number(value, verified_airtel):
-    number = normalize_number(value)
-    if not number:
+def sim_network(sim, airtel_set):
+    sim_norm = normalize_number(sim)
+    if not sim_norm or str(sim).strip().lower() in ("", "nan", "none"):
         return "Missing"
-    if number in verified_airtel:
+    if sim_norm in airtel_set:
         return "Airtel (verified)"
-    # number is stored as national significant number without leading 0
-    full_prefix = "0" + number[:3] if len(number) >= 10 else ""
-    if full_prefix in PREFIX_TO_NETWORK:
-        network = PREFIX_TO_NETWORK[full_prefix]
-        if network == "Airtel":
-            return "Airtel (prefix estimate)"
-        return f"{network} (prefix estimate)"
-    return "Unknown/Other"
+    prefix = None
+    if len(sim_norm) >= 9:
+        prefix = "0" + sim_norm[:3]
+    if prefix and prefix in PREFIX_TO_NETWORK:
+        return PREFIX_TO_NETWORK[prefix]
+    return "Unknown/Other (guessed)"
 
+def valid_imei(v):
+    v = str(v).replace(".00", "").strip()
+    return v.isdigit() and len(v) == 15
 
-def read_phone_list(frame):
-    phone_col = find_col(frame, [
-        "msisdn", "phone", "phone number", "mobile", "mobile number", "sim number",
-        "sim_number", "sim_num", "line", "line number", "number", "subscriber number",
-    ])
-    # If headers are unusual, use a column with the most values resembling phone numbers.
-    if phone_col is None:
-        best_col, best_score = None, 0
-        for col in frame.columns:
-            sample = frame[col].dropna().astype(str).head(500)
-            score = sum(1 for x in sample if len(re.sub(r"\D", "", x)) in (10, 11, 12, 13))
-            if score > best_score:
-                best_col, best_score = col, score
-        phone_col = best_col if best_score >= 3 else None
-    if phone_col is None:
-        return set(), None
-    nums = {normalize_number(x) for x in frame[phone_col].tolist()}
-    nums.discard("")
-    return nums, phone_col
+def is_excluded_email(email_str):
+    e = str(email_str).strip().lower()
+    if e in EXCLUDED_EMAILS:
+        return True
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in e:
+            return True
+    return False
 
+def extract_customer_emails(users_list_value):
+    if pd.isna(users_list_value) or str(users_list_value).strip() == "":
+        return []
+    found_emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", str(users_list_value))
+    return [e.strip().lower() for e in found_emails if not is_excluded_email(e.strip().lower())]
 
-# -------------------- Load committed repository data --------------------
-fleet_path = find_file(["devices_report.csv", "devices_report.csv.csv", "devices_report_*.csv", "devices_report*.xlsx", "devices_report*.xls"])
-if fleet_path is None:
-    st.error("Fleet report was not found in the GitHub repository. Commit devices_report.csv beside app.py.")
+def extract_clean_unique_emails(dataframe):
+    all_extracted_emails = set()
+    target_columns = [col for col in ["users_list", "user_emails", "primary_email"] if col in dataframe.columns]
+    for col in target_columns:
+        for val in dataframe[col].dropna():
+            found = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", str(val))
+            for email in found:
+                e = email.strip().lower()
+                if not is_excluded_email(e):
+                    all_extracted_emails.add(e)
+    return pd.DataFrame(sorted(list(all_extracted_emails)), columns=["Customer Email"])
+
+def safe_read_file(file_source):
+    filename = getattr(file_source, "name", str(file_source))
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(file_source, dtype=str)
+    try:
+        return pd.read_csv(file_source, encoding="utf-8-sig", dtype=str)
+    except pd.errors.EmptyDataError:
+        st.error(f"The file **{filename}** is empty. Please upload a valid report.")
+        st.stop()
+    except Exception:
+        try:
+            return pd.read_csv(file_source, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
+        except Exception:
+            return pd.read_csv(file_source, encoding="latin1", dtype=str)
+
+def first_existing_col(dataframe, candidates):
+    """Return the first matching column as a Series, trying each candidate
+    name in order. Handles pandas merge suffixes (_deal, _cust, etc.) so a
+    merged dataframe doesn't silently return blank data when the original
+    unsuffixed column name no longer exists after the merge."""
+    for c in candidates:
+        if c in dataframe.columns:
+            return dataframe[c]
+    return pd.Series([""] * len(dataframe), index=dataframe.index)
+
+# ==========================================
+# 5. File Selection & Dataset Execution
+# ==========================================
+uploaded_file = st.file_uploader("Upload new fleet report (Optional)", type=["csv", "xlsx", "xls"])
+airtel_file = st.file_uploader("Upload Airtel SIM list (Optional)", type=["csv", "xlsx"])
+
+DEFAULT_FILES = ["devices_report.csv.csv", "devices_report_1789914045.csv", "devices_report.csv"]
+default_path = next((f for f in DEFAULT_FILES if os.path.exists(f) and os.path.getsize(f) > 0), None)
+
+airtel_numbers = set()
+if airtel_file is not None:
+    airtel_df = safe_read_file(airtel_file)
+    airtel_df.columns = airtel_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+    msisdn_col = next((col for col in airtel_df.columns if col.lower() in ["msisdn", "phone", "sim", "sim_number", "mobile"]), None)
+    if msisdn_col:
+        airtel_numbers = set(airtel_df[msisdn_col].apply(normalize_number))
+        airtel_numbers.discard("")
+
+if uploaded_file is not None:
+    df = safe_read_file(uploaded_file)
+elif default_path:
+    df = safe_read_file(default_path)
+else:
+    st.warning("No fleet dataset found. Please upload a CSV or Excel report.")
     st.stop()
 
-df = read_data(fleet_path)
-st.caption(f"Fleet data source: `{fleet_path.relative_to(ROOT)}` (loaded from the GitHub repository)")
-st.caption(f"Reporting threshold: last {REPORTING_HOURS} hours. The dashboard uses the app server's current time.")
+df.columns = df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
 
-# Normalize common source column variations without discarding original data.
-rename_map = {}
-aliases = {
-    "sim_number": ["sim_number", "sim_num", "sim number", "sim", "phone", "phone_number", "msisdn", "mobile"],
-    "imei": ["imei", "device_imei", "imei_number"],
-    "plate_number": ["plate_number", "plate number", "registration_number", "registration number", "vehicle_registration", "registration"],
-    "last_connect_time": ["last_connect_time", "last report", "last_reporting", "last_report_time", "last connection", "last_connect", "last_reported_at"],
-    "expiration_date": ["expiration_date", "expiration date", "expire_date", "expiry date", "subscription_expiry", "expires_at"],
-    "created_at": ["created_at", "created at", "created"],
-    "users_list": ["users_list", "user_emails", "user email", "customer email", "email"],
-    "active": ["active", "is_active", "status_active"],
-    "name": ["name", "vehicle name", "object name"],
-    "id": ["id", "device id", "object id"],
-}
-for standard, options in aliases.items():
-    found = find_col(df, options)
-    if found and found != standard and standard not in df.columns:
-        rename_map[found] = standard
-if rename_map:
-    df = df.rename(columns=rename_map)
-
-for col in ["created_at", "last_connect_time", "expiration_date"]:
-    if col not in df.columns:
-        df[col] = pd.NaT
-    df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=False)
-
-if "active" not in df.columns:
-    df["active"] = "1"
-if "sim_number" not in df.columns:
-    df["sim_number"] = ""
-if "imei" not in df.columns:
-    df["imei"] = ""
-for col in ["id", "name", "plate_number", "users_list"]:
-    if col not in df.columns:
-        df[col] = ""
+df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+df["last_connect_time"] = pd.to_datetime(df["last_connect_time"], errors="coerce")
+df["expiration_date"] = pd.to_datetime(df["expiration_date"], errors="coerce")
 
 now = pd.Timestamp.now()
 df["hours_offline"] = (now - df["last_connect_time"]).dt.total_seconds() / 3600
 df["days_to_expiry"] = (df["expiration_date"] - now).dt.total_seconds() / 86400
-df["report_status"] = "Not reporting / unknown"
-df.loc[df["last_connect_time"].notna() & (df["hours_offline"] <= REPORTING_HOURS), "report_status"] = f"Reporting (last {REPORTING_HOURS}h)"
-df.loc[df["last_connect_time"].notna() & (df["hours_offline"] > REPORTING_HOURS), "report_status"] = f"Offline {REPORTING_HOURS}h+"
 
-df["user_emails"] = df["users_list"].apply(extract_emails)
-df["primary_email"] = df["user_emails"].apply(lambda items: items[0] if items else "")
-
-# Automatically discover the Airtel SIM inventory anywhere in the repository.
-airtel_path = find_file(["*airtel*.csv", "*airtel*.xlsx", "*airtel*.xls", "*sim*list*.csv", "*sim*list*.xlsx", "*sim*list*.xls"], exclude=[fleet_path])
-airtel_numbers = set()
-airtel_col = None
-if airtel_path:
-    try:
-        airtel_df = read_data(airtel_path)
-        airtel_numbers, airtel_col = read_phone_list(airtel_df)
-        st.caption(f"Airtel inventory: `{airtel_path.relative_to(ROOT)}`; loaded {len(airtel_numbers):,} normalized numbers from `{airtel_col or 'no phone column detected'}`.")
-    except Exception as exc:
-        st.warning(f"Could not read Airtel inventory: {exc}")
+if "users_list" in df.columns:
+    df["user_emails"] = df["users_list"].apply(extract_customer_emails)
+    df["primary_email"] = df["user_emails"].apply(lambda emails: emails[0] if emails else "")
 else:
-    st.warning("No Airtel SIM inventory found in the repository. Prefix classification is only an estimate; verified Airtel matching is unavailable.")
+    df["user_emails"] = [[] for _ in range(len(df))]
+    df["primary_email"] = ""
 
-df["sim_number_norm"] = df["sim_number"].apply(normalize_number)
-df["sim_network"] = df["sim_number"].apply(lambda x: network_for_number(x, airtel_numbers))
-df["active_flag"] = df["active"].astype(str).str.strip().str.lower().isin({"1", "true", "yes", "active", "enabled"})
-df["imei_clean"] = df["imei"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-
-reporting = df[df["last_connect_time"].notna() & (df["hours_offline"] <= REPORTING_HOURS)]
-not_reporting = df[df["last_connect_time"].isna() | (df["hours_offline"] > REPORTING_HOURS)]
-expired = df[df["days_to_expiry"] < 0]
+reporting_24h = df[df["hours_offline"] <= 24]
+not_reporting = df[df["hours_offline"] > 24]
+expired_total = df[df["days_to_expiry"] < 0]
 expired_24h = df[(df["days_to_expiry"] < 0) & (df["days_to_expiry"] >= -1)]
 expired_30d = df[(df["days_to_expiry"] < 0) & (df["days_to_expiry"] >= -30)]
 expiring_24h = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 1)]
 expiring_30d = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30)]
-active_vehicles = df[df["active_flag"]]
-active_offline = active_vehicles[active_vehicles["last_connect_time"].isna() | (active_vehicles["hours_offline"] > REPORTING_HOURS)]
-renewal = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) & df["last_connect_time"].notna() & (df["hours_offline"] <= REPORTING_HOURS)].sort_values("days_to_expiry")
 
-sim_blank = df["sim_number_norm"].eq("")
-sim_counts = df.loc[~sim_blank, "sim_number_norm"].value_counts()
-duplicate_sim_values = set(sim_counts[sim_counts > 1].index)
-duplicate_sim_rows = df[df["sim_number_norm"].isin(duplicate_sim_values)]
-invalid_imei = df[~df["imei"].apply(valid_imei)]
-imei_counts = df.loc[df["imei_clean"].str.fullmatch(r"\d{15}", na=False), "imei_clean"].value_counts()
-duplicate_imei_values = set(imei_counts[imei_counts > 1].index)
-duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imei_values)]
+active_vehicles = df[df["active"].astype(str).str.strip() == "1"] if "active" in df.columns else df.head(0)
+active_but_offline = active_vehicles[active_vehicles["hours_offline"] > 24]
+
+if "sim_number" in df.columns:
+    df["sim_number_norm"] = df["sim_number"].apply(normalize_number)
+    df["sim_network"] = df["sim_number"].apply(lambda x: sim_network(x, airtel_numbers))
+else:
+    df["sim_network"] = "Missing"
 
 network_breakdown = df["sim_network"].value_counts()
-airtel_offline = df[(df["sim_network"] == "Airtel (verified)") & (df["last_connect_time"].isna() | (df["hours_offline"] >= REPORTING_HOURS))].copy()
-airtel_offline = airtel_offline.sort_values("hours_offline", ascending=False, na_position="first")
 
-# -------------------- Phase 1: data quality and source reconciliation --------------------
-st.divider()
-st.subheader("🧾 Data Quality & Source Reconciliation")
-missing_required = [c for c in ["id", "name", "imei", "sim_number", "plate_number", "active", "last_connect_time", "expiration_date"] if c not in df.columns]
-missing_last_report = int(df["last_connect_time"].isna().sum())
-missing_expiry = int(df["expiration_date"].isna().sum())
-missing_plate = int(df["plate_number"].astype(str).str.strip().isin(["", "nan", "None"]).sum())
-duplicate_device_ids = int(df["id"].astype(str).duplicated(keep=False).sum()) if "id" in df.columns else 0
-duplicate_imeis_valid = int(len(duplicate_imei_rows))
-invalid_expiry = int(df["expiration_date"].isna().sum())
-quality_items = [
-    {"Check": "Fleet records loaded", "Result": f"{len(df):,}", "Status": "INFO"},
-    {"Check": "Missing required columns", "Result": ", ".join(missing_required) if missing_required else "None", "Status": "WARNING" if missing_required else "PASS"},
-    {"Check": "Missing last-report timestamps", "Result": f"{missing_last_report:,}", "Status": "WARNING" if missing_last_report else "PASS"},
-    {"Check": "Missing/invalid expiry dates", "Result": f"{missing_expiry:,}", "Status": "WARNING" if missing_expiry else "PASS"},
-    {"Check": "Missing vehicle plate/registration", "Result": f"{missing_plate:,}", "Status": "WARNING" if missing_plate else "PASS"},
-    {"Check": "Rows with duplicate device IDs", "Result": f"{duplicate_device_ids:,}", "Status": "WARNING" if duplicate_device_ids else "PASS"},
-    {"Check": "Rows with duplicate SIMs", "Result": f"{len(duplicate_sim_rows):,}", "Status": "WARNING" if len(duplicate_sim_rows) else "PASS"},
-    {"Check": "Rows with duplicate valid IMEIs", "Result": f"{duplicate_imeis_valid:,}", "Status": "WARNING" if duplicate_imeis_valid else "PASS"},
-]
-st.dataframe(pd.DataFrame(quality_items), use_container_width=True, hide_index=True)
-st.info("GPSWOX reconciliation is based on the committed fleet export in this app. This version does not call the live GPSWOX API, so it cannot independently confirm the current live admin count. Compare the loaded record count with the same-time GPSWOX export/admin count before treating it as reconciled.")
-with st.expander("How to reconcile against GPSWOX"):
-    st.markdown(f"""
-    - **Repository fleet export:** {len(df):,} rows from `{fleet_path.relative_to(ROOT)}`.
-    - **Reporting within {REPORTING_HOURS} hours:** {len(reporting):,}.
-    - **Older than {REPORTING_HOURS} hours or no timestamp:** {len(not_reporting):,}.
-    - **Expired by the export's expiry date:** {len(expired):,}.
-    - **Duplicate device IDs (rows involved):** {duplicate_device_ids:,}.
+missing_sim = df[df["sim_number"].isna() | (df["sim_number"].astype(str).str.strip() == "")] if "sim_number" in df.columns else df
+sim_counts = df["sim_number"].astype(str).value_counts() if "sim_number" in df.columns else pd.Series()
+duplicate_sims = sim_counts[sim_counts > 1].index.tolist()
+duplicate_sim_rows = df[df["sim_number"].astype(str).isin(duplicate_sims) & (df["sim_number"].astype(str) != "nan")] if "sim_number" in df.columns else df.head(0)
 
-    These values describe the committed file, not a live API query. For a fair comparison, export the same device scope from GPSWOX at approximately the same time and compare record counts, device IDs and expiry definitions.
-    """)
+if "imei" in df.columns:
+    df["imei_clean"] = df["imei"].astype(str).str.replace(".00", "", regex=False).str.strip()
+    invalid_imei = df[~df["imei"].apply(valid_imei)]
+    imei_counts = df["imei_clean"].value_counts()
+    duplicate_imeis = imei_counts[imei_counts > 1].index.tolist()
+    duplicate_imei_rows = df[df["imei_clean"].isin(duplicate_imeis)]
+else:
+    invalid_imei = df.head(0)
+    duplicate_imei_rows = df.head(0)
 
-# -------------------- KPI dashboard --------------------
-st.success("Analysis complete")
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric(f"Reporting (last {REPORTING_HOURS}h)", f"{len(reporting):,}")
-kpi2.metric("Not Reporting / Unknown", f"{len(not_reporting):,}")
-kpi3.metric("Expired (total)", f"{len(expired):,}")
-kpi4.metric("Active but Offline", f"{len(active_offline):,}")
-kpi5, kpi6, kpi7, kpi8 = st.columns(4)
-kpi5.metric("Expired (last 24h)", f"{len(expired_24h):,}")
-kpi6.metric("Expired (last 30d)", f"{len(expired_30d):,}")
-kpi7.metric("Expiring (next 24h)", f"{len(expiring_24h):,}")
-kpi8.metric("Expiring (next 30d)", f"{len(expiring_30d):,}")
+renewal_opportunity = df[(df["days_to_expiry"] >= 0) & (df["days_to_expiry"] <= 30) & (df["hours_offline"] <= 24)].sort_values("days_to_expiry")
 
-# -------------------- Zoho exports: auto-discovery and safer matching --------------------
-st.divider()
+stats = {
+    "total_vehicles": len(df),
+    "reporting_24h": len(reporting_24h),
+    "not_reporting": len(not_reporting),
+    "expired_last_24h": len(expired_24h),
+    "expired_last_30d": len(expired_30d),
+    "expired_total": len(expired_total),
+    "expiring_next_24h": len(expiring_24h),
+    "expiring_next_30d": len(expiring_30d),
+    "active_vehicles": len(active_vehicles),
+    "active_but_offline": len(active_but_offline),
+    "missing_sim": len(missing_sim),
+    "duplicate_sim_count": len(duplicate_sim_rows),
+    "invalid_imei": len(invalid_imei),
+    "duplicate_imei_count": len(duplicate_imei_rows),
+    "renewal_opportunity_count": len(renewal_opportunity),
+    "network_breakdown": network_breakdown.to_dict(),
+}
+
+# ==========================================
+# 6. Dashboard UI Metrics Rendering
+# ==========================================
+st.success("Analysis Complete!")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Reporting (24h)", f"{len(reporting_24h):,}")
+c2.metric("Not Reporting", f"{len(not_reporting):,}")
+c3.metric("Expired (total)", f"{len(expired_total):,}")
+c4.metric("Active but Offline", f"{len(active_but_offline):,}")
+
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("Expired (last 24h)", len(expired_24h))
+c6.metric("Expired (last 30d)", len(expired_30d))
+c7.metric("Expiring (next 24h)", len(expiring_24h))
+c8.metric("Expiring (next 30d)", len(expiring_30d))
+
+# ==========================================
+# 7. Automatic Zoho CRM File Linker & Recovery Matcher
+# ==========================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
-deals_path = find_file(["Deals_*.csv", "Deals_*.xlsx", "Deals_*.xls"])
-customers_path = find_file(["Customer_*.csv", "Customers_*.csv", "Accounts_*.csv", "Customer_*.xlsx", "Customers_*.xlsx", "Accounts_*.xlsx"])
-final_recovery = pd.DataFrame()
-zoho_merged = pd.DataFrame()
-zoho_diagnostics = {}
 
-if deals_path and customers_path:
-    st.caption(f"Using repository files: `{deals_path.relative_to(ROOT)}` and `{customers_path.relative_to(ROOT)}`")
-    try:
-        deals = read_data(deals_path)
-        customers = read_data(customers_path)
-        # Detect customer foreign key on Deals and record ID on Customers.
-        deal_link = find_col(deals, [
-            "Customer Name.id", "Customer Name Id", "Customer ID", "Customer Id",
-            "Accounts Name.id", "Account Name.id", "Account ID", "Account Id",
-            "Contact Name.id", "Contact ID", "Contact Id",
-        ])
-        customer_id = find_col(customers, ["Record Id", "Record ID", "id", "Customer ID", "Account ID"])
-        deal_plate = find_col(deals, ["Plate Number", "Vehicle Plate Number", "Registration Number", "Vehicle Registration", "Deal Name", "Vehicle Name", "Name"])
-        fleet_plate = find_col(df, ["plate_number", "registration_number", "name"])
-        customer_phone = find_col(customers, [
-            "Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Number",
-            "Mobile Phone", "Other Phone", "Home Phone", "Work Phone", "Primary Phone",
-            "WhatsApp Number", "WhatsApp", "Phone No", "Contact Phone", "Cell Phone",
-        ])
-        customer_email = find_col(customers, ["Email", "Email Address", "Primary Email", "Customer Email", "E-mail", "Email ID"])
-        deal_phone = find_col(deals, [
-            "Phone", "Phone Number", "Mobile", "Mobile Number", "Contact Number", "Telephone",
-            "Mobile Phone", "WhatsApp Number", "Phone No", "Contact Phone",
-        ])
-        deal_email = find_col(deals, ["Email", "Email Address", "Customer Email", "E-mail", "Email ID"])
+# Pick the most recently exported Deals/Customer CSVs automatically,
+# instead of a hardcoded date, so this keeps working on future exports.
+deals_candidates = sorted(glob.glob("Deals_*.csv"), reverse=True)
+cust_candidates = sorted(glob.glob("Customer_*.csv"), reverse=True)
+deals_path = deals_candidates[0] if deals_candidates else None
+cust_path = cust_candidates[0] if cust_candidates else None
 
-        # Join Deals to Customers using Zoho IDs if available; don't silently join on the wrong columns.
-        if deal_link and customer_id:
-            deals["_join_id"] = deals[deal_link].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            customers["_join_id"] = customers[customer_id].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            deals.loc[deals["_join_id"].str.lower().isin(["", "nan", "none", "null"]), "_join_id"] = ""
-            customers.loc[customers["_join_id"].str.lower().isin(["", "nan", "none", "null"]), "_join_id"] = ""
-            # Remove blank keys before merging; blank-to-blank joins create false matches.
-            deals_valid = deals[deals["_join_id"] != ""].copy()
-            customers_valid = customers[customers["_join_id"] != ""].copy()
-            zoho_merged = pd.merge(deals_valid, customers_valid, on="_join_id", how="left", suffixes=("_deal", "_cust"), indicator=True)
-            zoho_diagnostics["Join method"] = f"Zoho ID: Deals `{deal_link}` → Customers `{customer_id}`"
-            zoho_diagnostics["Deals with usable customer IDs"] = int((deals["_join_id"] != "").sum())
-            zoho_diagnostics["Deals linked to a customer record"] = int((zoho_merged["_merge"] == "both").sum())
-            zoho_diagnostics["Deals with unmatched customer IDs"] = int((zoho_merged["_merge"] == "left_only").sum())
-            zoho_merged = zoho_merged.drop(columns=["_merge"])
-        else:
-            zoho_merged = deals.copy()
-            zoho_diagnostics["Join method"] = "No reliable customer ID relationship detected; deal-only contact details will be used."
-        zoho_diagnostics["Deals rows"] = len(deals)
-        zoho_diagnostics["Customer rows"] = len(customers)
-        zoho_diagnostics["Deal plate column"] = deal_plate or "Not detected"
-        zoho_diagnostics["Customer phone column"] = customer_phone or "Not detected"
-        zoho_diagnostics["Customer email column"] = customer_email or "Not detected"
-        zoho_diagnostics["Deal phone column"] = deal_phone or "Not detected"
-        zoho_diagnostics["Deal email column"] = deal_email or "Not detected"
-        zoho_diagnostics["Deal ID column"] = find_col(deals, ["Record Id", "Record ID", "id", "Deal ID", "Deal Id"]) or "Not detected"
-        zoho_diagnostics["Customer ID column"] = customer_id or "Not detected"
-        zoho_diagnostics["Deal plate values present"] = int(deals[deal_plate].apply(normalize_plate).ne("").sum()) if deal_plate else 0
+if deals_path and cust_path:
+    st.caption(f"Using Zoho export files: `{deals_path}` and `{cust_path}`")
 
-        if deal_plate and fleet_plate:
-            zoho_merged["_match_plate"] = zoho_merged[deal_plate].apply(normalize_plate)
-            expired_units = df[df["days_to_expiry"] < 0].copy()
-            expired_units["_match_plate"] = expired_units[fleet_plate].apply(normalize_plate)
-            expired_units = expired_units[expired_units["_match_plate"] != ""]
-            zoho_merged = zoho_merged[zoho_merged["_match_plate"] != ""]
-            final_recovery = pd.merge(expired_units, zoho_merged, on="_match_plate", how="inner", suffixes=("", "_zoho"))
+    deals_df = safe_read_file(deals_path)
+    cust_df = safe_read_file(cust_path)
 
-            # Pull contact details from both the customer and deal exports, handling suffixes.
-            def pick_series(frame, names):
-                col = find_col(frame, names)
-                if col:
-                    return frame[col]
-                # Check suffixes for merged fields.
-                for name in names:
-                    for suffix in ["_cust", "_deal", "_zoho"]:
-                        col2 = name + suffix
-                        if col2 in frame.columns:
-                            return frame[col2]
-                return pd.Series([""] * len(frame), index=frame.index)
+    deals_df.columns = deals_df.columns.astype(str).str.strip()
+    cust_df.columns = cust_df.columns.astype(str).str.strip()
 
-            phone_candidates = [
-                "Phone_cust", "Phone Number_cust", "Mobile_cust", "Mobile Number_cust", "Telephone_cust",
-                "Contact Number_cust", "Mobile Phone_cust", "Other Phone_cust", "WhatsApp Number_cust",
-                "Phone", "Phone Number", "Mobile", "Mobile Number", "Telephone", "Contact Number",
-                "Mobile Phone", "Other Phone", "Home Phone", "Work Phone", "Primary Phone", "WhatsApp Number",
-                "Phone_deal", "Phone Number_deal", "Mobile_deal", "Mobile Number_deal", "Telephone_deal",
-                "Contact Number_deal", "Mobile Phone_deal", "WhatsApp Number_deal",
+    deal_link_col = "Customer Name.id" if "Customer Name.id" in deals_df.columns else "Accounts Name.id"
+    cust_link_col = "Record Id" if "Record Id" in cust_df.columns else cust_df.columns[0]
+
+    if deal_link_col in deals_df.columns and cust_link_col in cust_df.columns:
+        deals_df["link_id_clean"] = deals_df[deal_link_col].astype(str).str.strip()
+        cust_df["link_id_clean"] = cust_df[cust_link_col].astype(str).str.strip()
+
+        zoho_merged = pd.merge(
+            deals_df, cust_df,
+            left_on="link_id_clean", right_on="link_id_clean",
+            how="left", suffixes=("_deal", "_cust")
+        )
+
+        expired_units = df[df["days_to_expiry"] < 0].copy()
+        expired_units["match_plate"] = (
+            expired_units["plate_number"]
+            .astype(str).str.replace("-", "", regex=False)
+            .str.replace(" ", "", regex=False).str.upper()
+        )
+
+        deal_plate_col = next((c for c in ["Plate Number", "Deal Name", "Vehicle Name"] if c in zoho_merged.columns), None)
+
+        if deal_plate_col:
+            zoho_merged["match_plate"] = (
+                zoho_merged[deal_plate_col]
+                .astype(str).str.replace("-", "", regex=False)
+                .str.replace(" ", "", regex=False).str.upper()
+            )
+
+            final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner")
+
+            # Check every likely column name, including merge suffixes,
+            # so matches aren't silently lost when both source files
+            # share a column name like "Phone" or "Email".
+            phone_raw = first_existing_col(
+                final_recovery,
+                ["Phone", "Phone_cust", "Phone_deal", "Phone Number", "Phone Number_cust", "Phone Number_deal"],
+            )
+            email_raw = first_existing_col(
+                final_recovery,
+                ["Email", "Email_cust", "Email_deal", "Customer Email", "Customer Email_cust", "Customer Email_deal"],
+            )
+
+            final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
+            final_recovery["email_clean"] = email_raw.astype(str).str.strip().str.lower()
+
+            valid_calls = final_recovery[final_recovery["phone_clean"] != ""]
+            valid_emails = final_recovery[
+                (final_recovery["email_clean"] != "") &
+                (final_recovery["email_clean"] != "nan") &
+                (~final_recovery["email_clean"].isin(EXCLUDED_EMAILS)) &
+                (~final_recovery["email_clean"].str.contains("cartracker.ng", na=False))
             ]
-            email_candidates = [
-                "Email_cust", "Email Address_cust", "Primary Email_cust", "Customer Email_cust", "E-mail_cust",
-                "Email", "Email Address", "Primary Email", "Customer Email", "E-mail", "Email ID",
-                "Email_deal", "Email Address_deal", "Customer Email_deal", "E-mail_deal",
-            ]
-            phone_raw = pick_series(final_recovery, phone_candidates)
-            email_raw = pick_series(final_recovery, email_candidates)
-            final_recovery["customer_phone_norm"] = phone_raw.apply(normalize_number)
-            final_recovery["customer_phone"] = phone_raw.apply(format_phone_display)
-            final_recovery["customer_emails"] = email_raw.apply(lambda v: ", ".join(extract_emails(v)))
-            # Try each available contact column in priority order, filling only blanks.
-            for col in phone_candidates:
-                if col in final_recovery.columns:
-                    mask = final_recovery["customer_phone_norm"].eq("")
-                    raw = final_recovery[col]
-                    final_recovery.loc[mask, "customer_phone_norm"] = raw[mask].apply(normalize_number)
-                    final_recovery.loc[mask, "customer_phone"] = raw[mask].apply(format_phone_display)
-            for col in email_candidates:
-                if col in final_recovery.columns:
-                    mask = final_recovery["customer_emails"].eq("")
-                    final_recovery.loc[mask, "customer_emails"] = final_recovery.loc[mask, col].apply(lambda v: ", ".join(extract_emails(v)))
 
-            final_recovery = final_recovery.drop_duplicates(subset=["id", "_match_plate"] if "id" in final_recovery.columns else ["_match_plate"])
-            calls = final_recovery[final_recovery["customer_phone_norm"] != ""]
-            recovery_emails = final_recovery[final_recovery["customer_emails"] != ""]
-            zoho_diagnostics["Plate matches"] = len(final_recovery)
-            zoho_diagnostics["Matches with phone"] = len(calls)
-            zoho_diagnostics["Matches with email"] = len(recovery_emails)
-            zoho_diagnostics["Expired fleet rows eligible for plate match"] = int((df["days_to_expiry"] < 0).sum())
-            zoho_diagnostics["Expired fleet rows with a plate"] = int(((df["days_to_expiry"] < 0) & df[fleet_plate].apply(normalize_plate).ne("")).sum())
-            zoho_diagnostics["Matched expired units without phone"] = int((final_recovery["customer_phone_norm"] == "").sum())
-            zoho_diagnostics["Matched expired units without email"] = int((final_recovery["customer_emails"] == "").sum())
+            st.success(f"Successfully auto-matched **{len(final_recovery):,} expired vehicles** to Zoho CRM accounts from repository files!")
 
-            a, b, c = st.columns(3)
-            a.metric("Matched expired vehicles", f"{len(final_recovery):,}")
-            b.metric("With phone numbers", f"{len(calls):,}")
-            c.metric("With customer emails", f"{len(recovery_emails):,}")
-            display_cols = [c for c in ["plate_number", "name", "expiration_date", "customer_phone", "customer_emails"] if c in final_recovery.columns]
-            if display_cols:
-                st.dataframe(final_recovery[display_cols], use_container_width=True, hide_index=True)
-            if not calls.empty:
-                st.download_button("⬇️ Download expired fleet calling list", calls[display_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_calling_list.csv", "text/csv")
-            if not recovery_emails.empty:
-                st.download_button("⬇️ Download expired fleet email list", recovery_emails[display_cols].to_csv(index=False).encode("utf-8"), "zoho_expired_fleet_email_list.csv", "text/csv")
-            with st.expander("Zoho matching diagnostics"):
-                st.write(zoho_diagnostics)
-                st.caption("A plate match confirms the vehicle link only. Contact counts depend on actual values in the linked Zoho exports.")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Matched Expired Units", f"{len(final_recovery):,}")
+            m2.metric("Phone Numbers for Calling", f"{len(valid_calls):,}")
+            m3.metric("Verified Recovery Emails", f"{len(valid_emails):,}")
+
+            cust_name_col = "Customer Name_cust" if "Customer Name_cust" in final_recovery.columns else "Customer Name"
+            preview_cols = [c for c in ["plate_number", "name", "expiration_date", cust_name_col, "phone_clean", "email_clean"] if c in final_recovery.columns]
+
+            st.dataframe(final_recovery[preview_cols], use_container_width=True)
+
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.download_button(
+                    "⬇️ Download Expired Fleet Calling List (CSV)",
+                    final_recovery[preview_cols].to_csv(index=False),
+                    "zoho_expired_fleet_calling_list.csv",
+                    "text/csv",
+                    key="dl_btn_calling_list"
+                )
+            with col_d2:
+                st.download_button(
+                    "⬇️ Download Expired Fleet Email List (CSV)",
+                    valid_emails[preview_cols].to_csv(index=False),
+                    "zoho_expired_fleet_email_list.csv",
+                    "text/csv",
+                    key="dl_btn_email_list"
+                )
         else:
-            st.warning("Could not confidently identify the vehicle plate column in both the fleet report and Zoho Deals export.")
-            with st.expander("Zoho matching diagnostics"):
-                st.write(zoho_diagnostics)
-    except Exception as exc:
-        st.error(f"Zoho matching could not be completed: {type(exc).__name__}: {exc}")
-        with st.expander("Zoho matching diagnostics"):
-            st.write(zoho_diagnostics)
+            st.error("Could not find 'Plate Number' or 'Deal Name' in the uploaded Deals file.")
+    else:
+        st.error(f"Could not find a link column. Looked for '{deal_link_col}' in Deals and '{cust_link_col}' in Customer file.")
 else:
-    st.warning("Zoho exports were not found automatically. Commit Deals_*.csv and Customer_*.csv (or Customers_*.csv / Accounts_*.csv) beside app.py or in a repository subfolder.")
+    st.info("No Zoho export files found in repository root (expected files named like `Deals_YYYY_MM_DD.csv` and `Customer_YYYY_MM_DD.csv`).")
 
-# -------------------- Customer emails --------------------
-st.divider()
-st.subheader("✉️ Deduplicated Clean Customer Emails")
-all_emails = set()
-for value in df["users_list"].tolist():
-    all_emails.update(extract_emails(value))
-clean_emails_df = pd.DataFrame(sorted(all_emails), columns=["Customer Email"])
-st.write(f"Total clean unique customer emails: **{len(clean_emails_df):,}**")
-st.dataframe(clean_emails_df, use_container_width=True, hide_index=True)
-st.download_button("⬇️ Download clean unique customer emails", clean_emails_df.to_csv(index=False).encode("utf-8"), "deduplicated_customer_emails.csv", "text/csv")
+# ==========================================
+# 8. IMEI Vehicle & Customer Lookup
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">🔎 IMEI Vehicle & Customer Lookup</div>', unsafe_allow_html=True)
+st.caption("Search the fleet report by IMEI, then match the vehicle to Zoho Deals and Customers where a reliable match exists.")
 
-# -------------------- Network and SIM troubleshooting --------------------
-st.divider()
-st.subheader("📡 Network Breakdown")
+lookup_imei = st.text_input(
+    "Enter the 15-digit IMEI",
+    placeholder="e.g. 123456789012345",
+    key="imei_vehicle_lookup_input",
+).strip()
+
+if st.button("Search IMEI", key="imei_vehicle_lookup_button", type="primary"):
+    lookup_digits = "".join(ch for ch in lookup_imei if ch.isdigit())
+    if not lookup_digits:
+        st.warning("Enter an IMEI to search.")
+    else:
+        # Normalize IMEIs consistently; preserve leading zeroes by treating them as strings.
+        fleet_lookup = df.copy()
+        imei_col = next((c for c in ["imei", "IMEI", "Imei"] if c in fleet_lookup.columns), None)
+        if not imei_col:
+            st.error("The fleet report does not contain an IMEI column.")
+        else:
+            fleet_lookup["_lookup_imei"] = fleet_lookup[imei_col].fillna("").astype(str).str.strip().str.replace(r"\.0+$", "", regex=True).str.replace(r"\D", "", regex=True)
+            matches = fleet_lookup[fleet_lookup["_lookup_imei"] == lookup_digits].copy()
+
+            if matches.empty:
+                st.warning("No vehicle was found for that IMEI in the current fleet report.")
+            else:
+                if len(matches) > 1:
+                    st.warning(f"Found {len(matches)} fleet rows for this IMEI. Review the records below; duplicate IMEI data may need reconciliation.")
+
+                # Load the latest repository Zoho exports for this lookup section.
+                lookup_deals_path = sorted(glob.glob("Deals_*.csv"), reverse=True)
+                lookup_customers_path = sorted(glob.glob("Customer_*.csv"), reverse=True)
+                lookup_deals = None
+                lookup_customers = None
+                if lookup_deals_path:
+                    try:
+                        lookup_deals = safe_read_file(lookup_deals_path[0])
+                        lookup_deals.columns = lookup_deals.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+                    except Exception:
+                        lookup_deals = None
+                if lookup_customers_path:
+                    try:
+                        lookup_customers = safe_read_file(lookup_customers_path[0])
+                        lookup_customers.columns = lookup_customers.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+                    except Exception:
+                        lookup_customers = None
+
+                def _lookup_text(row, candidates):
+                    for col in candidates:
+                        if col in row.index:
+                            value = row.get(col, "")
+                            if pd.notna(value) and str(value).strip().lower() not in ("", "nan", "none", "null"):
+                                return str(value).strip()
+                    return ""
+
+                def _lookup_plate(value):
+                    if pd.isna(value):
+                        return ""
+                    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+                # Find the relevant Zoho Deal by registration/plate number.
+                deal_match = None
+                customer_match = None
+                customer_match_method = "Not matched"
+                first_vehicle = matches.iloc[0]
+                fleet_plate = _lookup_text(first_vehicle, ["plate_number", "registration_number", "Plate Number", "Registration Number"])
+                normalized_fleet_plate = _lookup_plate(fleet_plate)
+
+                if lookup_deals is not None and normalized_fleet_plate:
+                    deal_plate_col = next((c for c in ["Plate Number", "plate_number", "Registration Number", "Vehicle Registration Number"] if c in lookup_deals.columns), None)
+                    if deal_plate_col:
+                        deals_work = lookup_deals.copy()
+                        deals_work["_lookup_plate"] = deals_work[deal_plate_col].apply(_lookup_plate)
+                        deal_matches = deals_work[deals_work["_lookup_plate"] == normalized_fleet_plate].copy()
+                        if not deal_matches.empty:
+                            # Prefer the latest installation date; fall back to Modified Time / Created Time.
+                            sort_col = next((c for c in ["Installation Date", "Modified Time", "Created Time"] if c in deal_matches.columns), None)
+                            if sort_col:
+                                deal_matches["_lookup_sort_date"] = pd.to_datetime(deal_matches[sort_col], errors="coerce")
+                                deal_matches = deal_matches.sort_values("_lookup_sort_date", ascending=False, na_position="last")
+                            deal_match = deal_matches.iloc[0]
+                            customer_match_method = "Plate number"
+
+                # Link Deal.Customer Name.id to Customer.Record Id; fall back to exact customer name.
+                if deal_match is not None and lookup_customers is not None and not lookup_customers.empty:
+                    deal_customer_id = _lookup_text(deal_match, ["Customer Name.id"])
+                    if deal_customer_id and "Record Id" in lookup_customers.columns:
+                        id_matches = lookup_customers[lookup_customers["Record Id"].fillna("").astype(str).str.strip() == deal_customer_id]
+                        if not id_matches.empty:
+                            customer_match = id_matches.iloc[0]
+                    if customer_match is None:
+                        deal_customer_name = _lookup_text(deal_match, ["Customer Name"])
+                        if deal_customer_name and "Customer Name" in lookup_customers.columns:
+                            name_matches = lookup_customers[lookup_customers["Customer Name"].fillna("").astype(str).str.strip().str.casefold() == deal_customer_name.casefold()]
+                            if not name_matches.empty:
+                                customer_match = name_matches.iloc[0]
+
+                # Prefer the explicit Customer Name in the Deal if no Customer row was linked.
+                deal_customer_name = _lookup_text(deal_match, ["Customer Name"]) if deal_match is not None else ""
+                customer_name = ""
+                if customer_match is not None:
+                    customer_name = _lookup_text(customer_match, ["Customer Name"])
+                    if not customer_name:
+                        customer_name = " ".join(filter(None, [_lookup_text(customer_match, ["First Name"]), _lookup_text(customer_match, ["Last Name"])]))
+                if not customer_name:
+                    customer_name = deal_customer_name
+                if not customer_name:
+                    customer_name = _lookup_text(first_vehicle, ["object_owner", "customer_name", "Customer Name", "name"])
+                    if customer_name == _lookup_text(first_vehicle, ["name"]):
+                        # Device name is not necessarily the customer's name.
+                        customer_name = ""
+
+                customer_phone = _lookup_text(customer_match, ["Phone"]) if customer_match is not None else ""
+                customer_email = _lookup_text(customer_match, ["Email"]) if customer_match is not None else ""
+                if not customer_phone and deal_match is not None:
+                    customer_phone = _lookup_text(deal_match, ["Phone", "Phone Number"])
+                if not customer_email and deal_match is not None:
+                    customer_email = _lookup_text(deal_match, ["Email", "Customer Email"])
+
+                for idx, vehicle in matches.iterrows():
+                    vehicle_name = _lookup_text(vehicle, ["name", "Vehicle Name", "Vehicle Model", "device_model"])
+                    vehicle_model = _lookup_text(vehicle, ["device_model", "Vehicle Model", "Vehicle Name"])
+                    plate = _lookup_text(vehicle, ["plate_number", "registration_number", "Plate Number", "Registration Number"])
+                    sim = _lookup_text(vehicle, ["sim_number", "sim_num", "Sim Number", "sim_numbe"])
+                    last_conn = vehicle.get("last_connect_time", "")
+                    expiry = vehicle.get("expiration_date", "")
+                    last_conn_display = "Not available"
+                    if pd.notna(last_conn) and str(last_conn).strip() and str(last_conn).lower() != "nat":
+                        last_conn_display = pd.to_datetime(last_conn, errors="coerce")
+                        last_conn_display = last_conn_display.strftime("%d %b %Y, %I:%M %p") if pd.notna(last_conn_display) else str(last_conn)
+                    expiry_display = "Not available"
+                    days_left = None
+                    if pd.notna(expiry) and str(expiry).strip() and str(expiry).lower() != "nat":
+                        expiry_dt = pd.to_datetime(expiry, errors="coerce")
+                        if pd.notna(expiry_dt):
+                            expiry_display = expiry_dt.strftime("%d %b %Y")
+                            days_left = (expiry_dt.normalize() - pd.Timestamp.now().normalize()).days
+                    hours_offline = vehicle.get("hours_offline", float("nan"))
+                    if pd.notna(hours_offline):
+                        reporting_status = "Reporting (within 30 hours)" if float(hours_offline) <= 30 else "Not reporting (over 30 hours)"
+                    else:
+                        reporting_status = "Last connection unavailable"
+
+                    st.markdown(f"#### Vehicle result {idx + 1 if isinstance(idx, int) else ''}".strip())
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("IMEI", lookup_digits)
+                    c2.metric("Plate Number", plate or "Not available")
+                    c3.metric("Subscription Expiry", expiry_display)
+                    d1, d2, d3 = st.columns(3)
+                    d1.write("**Vehicle / Device**")
+                    d1.write(vehicle_name or "Not available")
+                    d2.write("**Vehicle Model**")
+                    d2.write(vehicle_model or "Not available")
+                    d3.write("**SIM Number**")
+                    d3.write(sim or "Not available")
+                    e1, e2 = st.columns(2)
+                    e1.write("**Last Connection**")
+                    e1.write(last_conn_display)
+                    e2.write("**Reporting Status**")
+                    e2.write(reporting_status)
+                    st.markdown("**Customer Details**")
+                    x1, x2, x3 = st.columns(3)
+                    x1.write("**Customer Name**")
+                    x1.write(customer_name or "No reliable Zoho customer match found")
+                    x2.write("**Phone**")
+                    x2.write(customer_phone or "Not available")
+                    x3.write("**Email**")
+                    x3.write(customer_email or "Not available")
+                    if deal_match is not None:
+                        st.caption(f"Zoho match: {customer_match_method}. Deal: {_lookup_text(deal_match, ['Deal Name']) or 'Not specified'}.")
+                    else:
+                        st.info("No Zoho Deal matched this vehicle's plate number. Vehicle details above are from the fleet report; customer details may be incomplete.")
+                    if days_left is not None:
+                        if days_left < 0:
+                            st.warning(f"Subscription expired {abs(days_left)} day(s) ago.")
+                        elif days_left == 0:
+                            st.warning("Subscription expires today.")
+                        elif days_left <= 30:
+                            st.warning(f"Subscription expires in {days_left} day(s).")
+
+# ==========================================
+# 8. Clean Customer Email Campaign Exporter
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">✉️ Deduplicated Clean Customer Emails</div>', unsafe_allow_html=True)
+clean_emails_df = extract_clean_unique_emails(df)
+
+st.write(f"Total Clean Customer Emails: **{len(clean_emails_df):,}** *(1 email per row, deduplicated, excluding internal `@cartracker` addresses and blacklisted emails)*")
+st.dataframe(clean_emails_df, use_container_width=True)
+st.download_button(
+    label="⬇️ Download Clean Unique Emails (CSV)",
+    data=clean_emails_df.to_csv(index=False).encode("utf-8"),
+    file_name="deduplicated_customer_emails.csv",
+    mime="text/csv",
+)
+
+# ==========================================
+# 9. Network Analytics, Data Quality & Airtel 48h Offline Report
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">📡 Network Breakdown</div>', unsafe_allow_html=True)
 st.bar_chart(network_breakdown)
-network_table = pd.DataFrame({
-    "Network": network_breakdown.index,
-    "Device count": network_breakdown.values,
-    "Percentage (%)": (network_breakdown.values / max(len(df), 1) * 100).round(2),
+
+st.markdown('<div class="icon-header">📊 Detailed SIM Network Diagnosis</div>', unsafe_allow_html=True)
+net_df = pd.DataFrame({
+    "Network Operator": network_breakdown.index,
+    "Device Count": network_breakdown.values,
+    "Percentage (%)": (network_breakdown.values / stats["total_vehicles"] * 100).round(2)
 })
-st.dataframe(network_table, use_container_width=True, hide_index=True)
-st.caption("Prefix-based classifications are estimates. Only an exact normalized match in the Airtel inventory is marked verified. Nigerian mobile number portability means prefix alone cannot prove the current network.")
-if airtel_path:
-    fleet_airtel_exact = int(df["sim_number_norm"].isin(airtel_numbers).sum())
-    st.caption(f"Airtel cross-check: {len(airtel_numbers):,} unique normalized inventory numbers; {fleet_airtel_exact:,} fleet SIM records match that inventory exactly. This is a file-to-file match, not a live SIM status check.")
+st.dataframe(net_df, use_container_width=True, hide_index=True)
 
-st.subheader(f"📡 Verified Airtel SIMs offline for {REPORTING_HOURS}+ hours")
-st.write(f"Found **{len(airtel_offline):,} verified Airtel devices** with no report in the last {REPORTING_HOURS} hours.")
-if not airtel_offline.empty:
-    airtel_cols = [c for c in ["id", "name", "plate_number", "sim_number", "imei", "last_connect_time", "hours_offline", "expiration_date"] if c in airtel_offline.columns]
-    st.dataframe(airtel_offline[airtel_cols], use_container_width=True, hide_index=True)
-    st.download_button("⬇️ Download verified Airtel offline list", airtel_offline[airtel_cols].to_csv(index=False).encode("utf-8"), "airtel_offline_30h.csv", "text/csv")
+st.markdown('<div class="icon-header">📡 Airtel SIMs Offline (48h+)</div>', unsafe_allow_html=True)
+# Verified-only match, since contacting a customer based on a guessed
+# network (rather than the confirmed Airtel list) risks acting on a
+# wrong assumption.
+airtel_48h_offline = df[
+    (df["sim_network"] == "Airtel (verified)") &
+    (df["hours_offline"] >= 48)
+].sort_values("hours_offline", ascending=False)
 
-st.subheader("🔍 SIM & IMEI Data Quality")
-q1, q2, q3, q4 = st.columns(4)
-q1.metric("Missing SIM", f"{int(sim_blank.sum()):,}")
-q2.metric("Rows with duplicate SIMs", f"{len(duplicate_sim_rows):,}")
-q3.metric("Invalid IMEI", f"{len(invalid_imei):,}")
-q4.metric("Rows with duplicate IMEIs", f"{len(duplicate_imei_rows):,}")
+st.write(f"Found **{len(airtel_48h_offline):,} verified Airtel units** offline for 48 hours or more.")
+if not airtel_48h_offline.empty:
+    preview_cols_airtel = [c for c in ["id", "name", "plate_number", "sim_number", "hours_offline", "expiration_date"] if c in airtel_48h_offline.columns]
+    st.dataframe(airtel_48h_offline[preview_cols_airtel], use_container_width=True)
+    st.download_button(
+        "⬇️ Download Airtel 48h Offline List (CSV)",
+        airtel_48h_offline[preview_cols_airtel].to_csv(index=False),
+        "airtel_48h_offline_fleet.csv",
+        "text/csv",
+        key="dl_btn_airtel_48h"
+    )
 
-st.subheader("🛠️ SIM & Device Troubleshooting Workbench")
-issues = df.copy()
-issues["issue_reason"] = ""
-issues["priority"] = "Low"
-issues.loc[issues["last_connect_time"].isna(), "issue_reason"] += "No last-report timestamp; "
-issues.loc[issues["last_connect_time"].notna() & (issues["hours_offline"] >= REPORTING_HOURS), "issue_reason"] += f"Offline {REPORTING_HOURS}h+; "
-issues.loc[sim_blank, "issue_reason"] += "Missing SIM; "
-issues.loc[issues.index.isin(duplicate_sim_rows.index), "issue_reason"] += "Duplicate SIM; "
-issues.loc[issues.index.isin(invalid_imei.index), "issue_reason"] += "Invalid IMEI; "
-issues.loc[issues.index.isin(duplicate_imei_rows.index), "issue_reason"] += "Duplicate IMEI; "
-high_mask = issues["last_connect_time"].isna() | (issues["hours_offline"] >= 72) | issues.index.isin(invalid_imei.index) | issues.index.isin(duplicate_imei_rows.index)
-medium_mask = (issues["hours_offline"] >= REPORTING_HOURS) | sim_blank | issues.index.isin(duplicate_sim_rows.index)
-issues.loc[medium_mask, "priority"] = "Medium"
-issues.loc[high_mask, "priority"] = "High"
-issues = issues[issues["issue_reason"] != ""].copy()
-priority_filter = st.multiselect("Filter troubleshooting priority", ["High", "Medium", "Low"], default=["High", "Medium"])
-issue_filter = st.selectbox("Show devices with", ["Any flagged issue", "Offline 30h+", "Missing SIM", "Duplicate SIM", "Invalid IMEI", "Duplicate IMEI", "Verified Airtel"])
-filtered_issues = issues[issues["priority"].isin(priority_filter)]
-if issue_filter == "Offline 30h+":
-    filtered_issues = filtered_issues[filtered_issues["hours_offline"].ge(REPORTING_HOURS) | filtered_issues["last_connect_time"].isna()]
-elif issue_filter == "Missing SIM":
-    filtered_issues = filtered_issues[filtered_issues["sim_number_norm"].eq("")]
-elif issue_filter == "Duplicate SIM":
-    filtered_issues = filtered_issues[filtered_issues.index.isin(duplicate_sim_rows.index)]
-elif issue_filter == "Invalid IMEI":
-    filtered_issues = filtered_issues[filtered_issues.index.isin(invalid_imei.index)]
-elif issue_filter == "Duplicate IMEI":
-    filtered_issues = filtered_issues[filtered_issues.index.isin(duplicate_imei_rows.index)]
-elif issue_filter == "Verified Airtel":
-    filtered_issues = filtered_issues[filtered_issues["sim_network"].eq("Airtel (verified)")]
-st.write(f"Devices in troubleshooting view: **{len(filtered_issues):,}**")
-st.write(f"High priority: **{int((filtered_issues['priority'] == 'High').sum()):,}** · Offline/unknown: **{int((filtered_issues['last_connect_time'].isna() | (filtered_issues['hours_offline'] >= REPORTING_HOURS)).sum()):,}**")
-issue_cols = [c for c in ["id", "name", "plate_number", "sim_number", "sim_network", "imei", "last_connect_time", "hours_offline", "expiration_date", "priority", "issue_reason"] if c in filtered_issues.columns]
-if not filtered_issues.empty:
-    st.dataframe(filtered_issues[issue_cols], use_container_width=True, hide_index=True)
-    st.download_button("⬇️ Download troubleshooting report", filtered_issues[issue_cols].to_csv(index=False).encode("utf-8"), "fleet_troubleshooting_report.csv", "text/csv")
-else:
-    st.info("No devices match the selected troubleshooting filters.")
+st.markdown('<div class="icon-header">🔍 SIM & IMEI Data Quality</div>', unsafe_allow_html=True)
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Missing SIM", stats["missing_sim"])
+d2.metric("Duplicate SIMs", stats["duplicate_sim_count"])
+d3.metric("Invalid IMEI", stats["invalid_imei"])
+d4.metric("Duplicate IMEIs", stats["duplicate_imei_count"])
 
-with st.expander("Suggested field troubleshooting checklist"):
-    st.markdown("""
-    1. Confirm the SIM is active and has a valid data plan with the telecom provider.
-    2. Check device power, ignition wiring, antenna and installation condition.
-    3. Confirm APN and server address/port match the device configuration.
-    4. Compare the IMEI and SIM number on the physical device with the fleet record.
-    5. Check network coverage and last known GPS/GSM signal on the tracking platform.
-    6. Record the technician, action taken, test result and resolution time.
+# ==========================================
+# 10. Renewal Opportunities & Expired List
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">💰 Renewal Opportunities</div>', unsafe_allow_html=True)
+st.write(f"Found **{len(renewal_opportunity):,} vehicles** ready for renewal.")
+st.dataframe(renewal_opportunity[["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date"]], use_container_width=True)
 
-    These are diagnostic leads, not proof that the SIM or tracker is faulty.
-    """)
+st.markdown('<div class="icon-header">⚠️ Expired Vehicles List (All Units)</div>', unsafe_allow_html=True)
+expired_df = df[df["days_to_expiry"] < 0]
+st.write(f"Found **{len(expired_df):,} total expired vehicles**.")
+st.download_button(
+    "⬇️ Download Expired Vehicles List (CSV)",
+    expired_df.to_csv(index=False),
+    "expired_vehicles_list.csv",
+    "text/csv",
+)
 
-# -------------------- Renewals and expired fleet --------------------
-st.divider()
-st.subheader("💰 Renewal Opportunities")
-st.write(f"Found **{len(renewal):,} vehicles** reporting within {REPORTING_HOURS} hours and expiring within 30 days.")
-renewal_cols = [c for c in ["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date", "last_connect_time"] if c in renewal.columns]
-st.dataframe(renewal[renewal_cols], use_container_width=True, hide_index=True)
-if not renewal.empty:
-    st.download_button("⬇️ Download renewal opportunities", renewal[renewal_cols].to_csv(index=False).encode("utf-8"), "renewal_opportunities.csv", "text/csv")
-st.subheader("⚠️ Expired Vehicles List")
-st.write(f"Found **{len(expired):,} expired vehicles**.")
-expired_cols = [c for c in ["id", "name", "plate_number", "sim_number", "primary_email", "expiration_date", "last_connect_time"] if c in expired.columns]
-st.dataframe(expired[expired_cols].head(500), use_container_width=True, hide_index=True)
-st.download_button("⬇️ Download all expired vehicles", expired.to_csv(index=False).encode("utf-8"), "expired_vehicles_list.csv", "text/csv")
+# ==========================================
+# 11. AI Intelligence via Gemini API
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">🤖 AI Fleet Intelligence</div>', unsafe_allow_html=True)
 
-# -------------------- Data definitions and references --------------------
-st.divider()
-with st.expander("📚 Data sources, definitions & references"):
-    st.markdown(f"""
-    **Data sources**
-    - Fleet report: `{fleet_path.relative_to(ROOT)}` from the GitHub repository.
-    - Airtel inventory: `{airtel_path.relative_to(ROOT) if airtel_path else 'Not found'}`.
-    - Zoho exports: Deals and Customer/Customers/Accounts files discovered in the repository.
-
-    **Reconciliation scope**
-    - This app reads repository snapshots; it does not currently query GPSWOX or Zoho live APIs.
-    - GPSWOX counts can differ if the export and admin page use different filters, device scopes, or export times.
-    - Zoho recovery results require both a normalized plate match and a linked customer record; unmatched IDs and absent contact fields are surfaced in diagnostics.
-    - Phone numbers are normalized for matching and displayed in national format where possible; verify records before contacting customers.
-
-    **Definitions**
-    - Reporting: a valid `last_connect_time` within the last {REPORTING_HOURS} hours.
-    - Not reporting / unknown: last report is older than {REPORTING_HOURS} hours or missing.
-    - Expired: expiration date is before the dashboard server's current time.
-    - Verified Airtel: normalized SIM number exactly matches a number in the discovered Airtel inventory.
-    - Prefix estimate: network inferred from Nigerian mobile prefix; mobile number portability can make this incorrect.
-    - Zoho plate match: normalized plate text matches between an expired fleet record and a Zoho Deals record. Contact details are shown only when found in exported columns.
-
-    **Technical references**
-    - [Streamlit documentation](https://docs.streamlit.io/)
-    - [pandas documentation](https://pandas.pydata.org/docs/)
-    - [Google Gemini API documentation](https://ai.google.dev/gemini-api/docs)
-    - [Nigerian Communications Commission](https://www.ncc.gov.ng/)
-    """)
-
-# -------------------- Optional Gemini AI --------------------
-st.divider()
-st.subheader("🤖 AI Fleet Intelligence")
-if not GEMINI_API_KEY:
-    st.info("AI summary is disabled because GEMINI_API_KEY is not configured in Streamlit secrets or environment variables.")
-elif genai is None:
-    st.info("The Google GenAI package is unavailable. Check requirements.txt for google-genai.")
-else:
+if GEMINI_API_KEY:
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        ai_stats = {
-            "total_records": len(df),
-            "reporting_last_30h": len(reporting),
-            "not_reporting_or_unknown": len(not_reporting),
-            "expired_total": len(expired),
-            "active_but_offline": len(active_offline),
-            "expiring_next_30d": len(expiring_30d),
-            "renewal_opportunities": len(renewal),
-            "missing_sim": int(sim_blank.sum()),
-            "duplicate_sim_rows": len(duplicate_sim_rows),
-            "invalid_imei": len(invalid_imei),
-            "duplicate_imei_rows": len(duplicate_imei_rows),
-            "verified_airtel_offline_30h": len(airtel_offline),
-            "zoho_expired_plate_matches": len(final_recovery),
-        }
         prompt = (
-            "You are an operations analyst for a vehicle tracking fleet. Use only these verified counts. "
-            "Do not claim that offline devices are definitely faulty. Return concise sections: Executive summary, "
-            "Key insights, Recommended actions.\n\n" + json.dumps(ai_stats, indent=2)
+            "You are analyzing a fleet tracking dataset. Use ONLY these verified numbers:\n"
+            + json.dumps(stats, indent=2, default=str)
+            + "\n\nReturn valid JSON with keys: summary, insights, actions."
         )
-        response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-        st.markdown(response.text or "The AI model returned an empty response.")
-    except Exception as exc:
-        st.warning(f"AI summary could not be generated. The rest of the dashboard is still available. Details: {type(exc).__name__}: {exc}")
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt
+        )
+        raw = response.text.strip().strip("`").replace("json", "", 1).strip()
+        result = json.loads(raw)
+
+        st.subheader("📋 AI Executive Summary")
+        st.write(result.get("summary", ""))
+
+        st.subheader("💡 Insights")
+        for i in result.get("insights", []):
+            st.markdown(f"- {i}")
+
+        st.subheader("🛠️ Recommended Actions")
+        for a in result.get("actions", []):
+            st.markdown(f"- **{a.get('task', '')}**: {a.get('detail', '')}")
+    except Exception:
+        st.info("AI summary engine standby or API rate limit reached.")
