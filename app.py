@@ -436,97 +436,277 @@ else:
         st.caption(f"Zoho linker diagnostic: {type(exc).__name__}: {exc}")
 
 # ==========================================
-# Live tracking API IMEI lookup (Protrack OpenAPI)
+
+# ==========================================
+# Live Tracking API IMEI Lookup
 # ==========================================
 st.write("---")
-st.markdown('<div class="icon-header">🌐 Live Tracking API Lookup</div>', unsafe_allow_html=True)
-st.caption("Uses the API specification's login → user_api_hash → get_devices flow. Configure credentials in Streamlit Secrets; do not put passwords in this file.")
+st.markdown(
+    '<div class="icon-header">🌐 Live Tracking API Lookup</div>',
+    unsafe_allow_html=True
+)
+st.caption(
+    "Search for a device using the tracking API. "
+    "Credentials must be configured in Streamlit Cloud Secrets."
+)
 
-# Secrets expected in Streamlit Cloud: TRACKING_API_BASE_URL, TRACKING_API_EMAIL, TRACKING_API_PASSWORD
+# Required Streamlit Secrets:
+# TRACKING_API_BASE_URL
+# TRACKING_API_EMAIL
+# TRACKING_API_PASSWORD
+
 try:
-    _api_base = str(st.secrets.get("TRACKING_API_BASE_URL", "https://app.protrack.ng/api")).rstrip("/")
-    _api_email = str(st.secrets.get("TRACKING_API_EMAIL", "")).strip()
-    _api_password = str(st.secrets.get("TRACKING_API_PASSWORD", "")).strip()
+    _api_base = str(
+        st.secrets.get(
+            "TRACKING_API_BASE_URL",
+            "https://app.protrack.ng/api"
+        )
+    ).strip().rstrip("/")
+
+    _api_email = str(
+        st.secrets.get("TRACKING_API_EMAIL", "")
+    ).strip()
+
+    _api_password = str(
+        st.secrets.get("TRACKING_API_PASSWORD", "")
+    ).strip()
+
 except Exception:
     _api_base = "https://app.protrack.ng/api"
     _api_email = ""
     _api_password = ""
 
-api_imei = st.text_input("Search live API by IMEI", placeholder="Enter IMEI", key="live_api_imei_input").strip()
-if st.button("Search Live Tracking API", key="live_api_imei_button", type="primary"):
+api_imei = st.text_input(
+    "Search live API by IMEI",
+    placeholder="Enter IMEI",
+    key="live_api_imei_input"
+).strip()
+
+if st.button(
+    "Search Live Tracking API",
+    key="live_api_imei_button",
+    type="primary"
+):
     if not api_imei:
         st.warning("Enter an IMEI first.")
+
     elif not _api_email or not _api_password:
-        st.error("Live API credentials are not configured. In Streamlit Cloud, open App settings → Secrets and add TRACKING_API_EMAIL, TRACKING_API_PASSWORD, and TRACKING_API_BASE_URL if CarTracker supplied a different API URL.")
+        st.error(
+            "API credentials are not configured. Add "
+            "TRACKING_API_EMAIL, TRACKING_API_PASSWORD and "
+            "TRACKING_API_BASE_URL in Streamlit Cloud Secrets."
+        )
+
     else:
+        api_stage = "login"
+
         try:
-            with st.spinner("Authenticating and retrieving live device data..."):
+            with st.spinner(
+                "Authenticating and retrieving device data..."
+            ):
+                # Step 1: Authenticate
                 login_response = requests.post(
                     f"{_api_base}/login",
-                    files={"email": (None, _api_email), "password": (None, _api_password)},
-                    timeout=25,
+                    files={
+                        "email": (None, _api_email),
+                        "password": (None, _api_password)
+                    },
+                    timeout=25
                 )
+
                 login_response.raise_for_status()
                 login_data = login_response.json()
+
                 api_hash = login_data.get("user_api_hash")
+
                 if not api_hash or login_data.get("status") == 0:
-                    st.error("The API did not return an authentication token. Check the API URL and credentials.")
+                    st.error(
+                        "Login response did not contain a usable "
+                        "authentication token. Verify the API host, "
+                        "login endpoint and authentication format."
+                    )
+
                 else:
+                    # Step 2: Retrieve devices
+                    api_stage = "device retrieval"
+
                     devices_response = requests.get(
                         f"{_api_base}/get_devices",
-                        params={"lang": "en", "user_api_hash": api_hash},
-                        timeout=45,
+                        params={
+                            "lang": "en",
+                            "user_api_hash": api_hash
+                        },
+                        timeout=45
                     )
+
                     devices_response.raise_for_status()
                     devices_payload = devices_response.json()
+
+                    # Normalize supported response structures
                     device_items = []
+
                     if isinstance(devices_payload, list):
                         for group in devices_payload:
                             if isinstance(group, dict):
                                 items = group.get("items", [])
                                 if isinstance(items, list):
-                                    device_items.extend(x for x in items if isinstance(x, dict))
+                                    device_items.extend(
+                                        x for x in items
+                                        if isinstance(x, dict)
+                                    )
+
                     elif isinstance(devices_payload, dict):
-                        possible = devices_payload.get("items", devices_payload.get("data", []))
+                        possible = devices_payload.get(
+                            "items",
+                            devices_payload.get("data", [])
+                        )
+
                         if isinstance(possible, list):
-                            device_items.extend(x for x in possible if isinstance(x, dict))
+                            device_items.extend(
+                                x for x in possible
+                                if isinstance(x, dict)
+                            )
+
+                    # Step 3: Match IMEI
                     target_imei = re.sub(r"\D", "", api_imei)
                     matched_devices = []
+
                     for item in device_items:
-                        details = item.get("device_data", {}) if isinstance(item.get("device_data"), dict) else {}
-                        candidate = re.sub(r"\D", "", str(details.get("imei", item.get("imei", ""))))
-                        if candidate and candidate == target_imei:
+                        details = item.get("device_data", {})
+
+                        if not isinstance(details, dict):
+                            details = {}
+
+                        candidate_imei = re.sub(
+                            r"\D",
+                            "",
+                            str(
+                                details.get(
+                                    "imei",
+                                    item.get("imei", "")
+                                )
+                            )
+                        )
+
+                        if (
+                            candidate_imei
+                            and candidate_imei == target_imei
+                        ):
                             matched_devices.append((item, details))
+
                     if not matched_devices:
-                        st.warning(f"No device with IMEI {api_imei} was returned by the live API. The API returned {len(device_items):,} device records. Confirm that this account has access to the device.")
+                        st.warning(
+                            f"No matching device was found for IMEI "
+                            f"{api_imei}. The API returned "
+                            f"{len(device_items):,} device records. "
+                            "Confirm the account has access to this device "
+                            "and check the response format."
+                        )
+
                     else:
-                        for n, (item, details) in enumerate(matched_devices, start=1):
+                        st.success(
+                            f"Found {len(matched_devices)} matching "
+                            "device record(s)."
+                        )
+
+                        for n, (item, details) in enumerate(
+                            matched_devices,
+                            start=1
+                        ):
                             st.markdown(f"**Live API match {n}**")
+
                             live_fields = {
                                 "IMEI": details.get("imei", api_imei),
-                                "Vehicle / Device Name": details.get("name", item.get("name", "")),
-                                "Registration / Plate": details.get("plate_number", details.get("registration_number", "")),
+                                "Vehicle / Device Name": details.get(
+                                    "name", item.get("name", "")
+                                ),
+                                "Registration / Plate": details.get(
+                                    "plate_number",
+                                    details.get("registration_number", "")
+                                ),
                                 "VIN / Chassis": details.get("vin", ""),
-                                "Device Model": details.get("device_model", ""),
-                                "SIM Number": details.get("sim_number", ""),
-                                "Customer / Owner": details.get("object_owner", ""),
-                                "Subscription Expiry": details.get("expiration_date", ""),
-                                "Last Connection / Position Time": item.get("time", ""),
+                                "Device Model": details.get(
+                                    "device_model", ""
+                                ),
+                                "SIM Number": details.get(
+                                    "sim_number",
+                                    details.get("sim_num", "")
+                                ),
+                                "Customer / Owner": details.get(
+                                    "object_owner", ""
+                                ),
+                                "Subscription Expiry": details.get(
+                                    "expiration_date", ""
+                                ),
+                                "Last Connection / Position Time": item.get(
+                                    "time", ""
+                                ),
                                 "Online Status": item.get("online", ""),
                                 "Speed": item.get("speed", ""),
                                 "Last Address": item.get("address", ""),
-                                "Protocol": item.get("protocol", details.get("protocol", "")),
+                                "Protocol": item.get(
+                                    "protocol",
+                                    details.get("protocol", "")
+                                )
                             }
-                            st.dataframe(pd.DataFrame([{"Field": k, "Value": ("" if v is None else str(v))} for k, v in live_fields.items()]), hide_index=True, use_container_width=True)
+
+                            display_df = pd.DataFrame([
+                                {
+                                    "Field": key,
+                                    "Value": (
+                                        "" if value is None
+                                        else str(value)
+                                    )
+                                }
+                                for key, value in live_fields.items()
+                            ])
+
+                            st.dataframe(
+                                display_df,
+                                hide_index=True,
+                                use_container_width=True
+                            )
+
         except requests.exceptions.Timeout:
-            st.error("The tracking API timed out. Check that the configured API server is reachable from Streamlit Cloud.")
+            st.error(
+                f"API request timed out during {api_stage}. "
+                "Check server availability and network access."
+            )
+
         except requests.exceptions.HTTPError as exc:
-            code = exc.response.status_code if exc.response is not None else "unknown"
-            st.error(f"Tracking API returned HTTP {code}. Verify the API base URL, endpoint availability, and credentials. No password is displayed.")
+            response = exc.response
+            status_code = (
+                response.status_code
+                if response is not None
+                else "unknown"
+            )
+            failed_url = (
+                response.url
+                if response is not None
+                else "unknown"
+            )
+
+            st.error(
+                f"API stage failed: {api_stage}\n\n"
+                f"HTTP status: {status_code}\n\n"
+                f"Request URL: {failed_url}\n\n"
+                "Verify the API host, endpoint and authentication "
+                "requirements. Credentials and tokens are not displayed."
+            )
+
         except (requests.exceptions.RequestException, ValueError) as exc:
-            st.error(f"Could not complete the live API lookup ({type(exc).__name__}). Check the API server URL and response format.")
+            st.error(
+                f"API request or response parsing failed during "
+                f"{api_stage}: {type(exc).__name__}. "
+                "Check the API server and response format."
+            )
+
         except Exception as exc:
-            st.error(f"Live API lookup failed safely: {type(exc).__name__}: {exc}")
+            st.error(
+                f"Live API lookup failed during {api_stage}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
 
 # ==========================================
 # 9. IMEI Vehicle & Customer Lookup
