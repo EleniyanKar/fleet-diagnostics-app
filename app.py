@@ -335,114 +335,201 @@ c8.metric("Expiring (next 30d)", len(expiring_30d))
 # ==========================================
 st.subheader("📞 Zoho CRM & Expired Fleet Recovery Linker")
 
-# Pick the most recently exported Deals/Customer CSVs automatically,
-# instead of a hardcoded date, so this keeps working on future exports.
-deals_candidates = sorted(glob.glob("Deals_*.csv"), reverse=True)
-cust_candidates = sorted(glob.glob("Customer_*.csv"), reverse=True)
+# Use repository-relative paths so this works regardless of Streamlit's working directory.
+deals_candidates = sorted(glob.glob(os.path.join(REPO_DIR, "Deals_*.csv")), reverse=True)
+cust_candidates = sorted(glob.glob(os.path.join(REPO_DIR, "Customer_*.csv")), reverse=True)
 deals_path = deals_candidates[0] if deals_candidates else None
 cust_path = cust_candidates[0] if cust_candidates else None
 
-if deals_path and cust_path:
-    st.caption(f"Using Zoho export files: `{deals_path}` and `{cust_path}`")
-
-    deals_df = safe_read_file(deals_path)
-    cust_df = safe_read_file(cust_path)
-
-    deals_df.columns = deals_df.columns.astype(str).str.strip()
-    cust_df.columns = cust_df.columns.astype(str).str.strip()
-
-    deal_link_col = "Customer Name.id" if "Customer Name.id" in deals_df.columns else "Accounts Name.id"
-    cust_link_col = "Record Id" if "Record Id" in cust_df.columns else cust_df.columns[0]
-
-    if deal_link_col in deals_df.columns and cust_link_col in cust_df.columns:
-        deals_df["link_id_clean"] = deals_df[deal_link_col].astype(str).str.strip()
-        cust_df["link_id_clean"] = cust_df[cust_link_col].astype(str).str.strip()
-
-        zoho_merged = pd.merge(
-            deals_df, cust_df,
-            left_on="link_id_clean", right_on="link_id_clean",
-            how="left", suffixes=("_deal", "_cust")
-        )
-
-        expired_units = df[df["days_to_expiry"] < 0].copy()
-        expired_units["match_plate"] = (
-            expired_units["plate_number"]
-            .astype(str).str.replace("-", "", regex=False)
-            .str.replace(" ", "", regex=False).str.upper()
-        )
-
-        deal_plate_col = next((c for c in ["Plate Number", "Deal Name", "Vehicle Name"] if c in zoho_merged.columns), None)
-
-        if deal_plate_col:
-            zoho_merged["match_plate"] = (
-                zoho_merged[deal_plate_col]
-                .astype(str).str.replace("-", "", regex=False)
-                .str.replace(" ", "", regex=False).str.upper()
-            )
-
-            final_recovery = pd.merge(expired_units, zoho_merged, on="match_plate", how="inner")
-
-            # Check every likely column name, including merge suffixes,
-            # so matches aren't silently lost when both source files
-            # share a column name like "Phone" or "Email".
-            phone_raw = first_existing_col(
-                final_recovery,
-                ["Phone", "Phone_cust", "Phone_deal", "Phone Number", "Phone Number_cust", "Phone Number_deal"],
-            )
-            email_raw = first_existing_col(
-                final_recovery,
-                ["Email", "Email_cust", "Email_deal", "Customer Email", "Customer Email_cust", "Customer Email_deal"],
-            )
-
-            final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
-            final_recovery["email_clean"] = email_raw.astype(str).str.strip().str.lower()
-
-            valid_calls = final_recovery[final_recovery["phone_clean"] != ""]
-            valid_emails = final_recovery[
-                (final_recovery["email_clean"] != "") &
-                (final_recovery["email_clean"] != "nan") &
-                (~final_recovery["email_clean"].isin(EXCLUDED_EMAILS)) &
-                (~final_recovery["email_clean"].str.contains("cartracker.ng", na=False))
-            ]
-
-            st.success(f"Successfully auto-matched **{len(final_recovery):,} expired vehicles** to Zoho CRM accounts from repository files!")
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Matched Expired Units", f"{len(final_recovery):,}")
-            m2.metric("Phone Numbers for Calling", f"{len(valid_calls):,}")
-            m3.metric("Verified Recovery Emails", f"{len(valid_emails):,}")
-
-            cust_name_col = "Customer Name_cust" if "Customer Name_cust" in final_recovery.columns else "Customer Name"
-            preview_cols = [c for c in ["plate_number", "name", "expiration_date", cust_name_col, "phone_clean", "email_clean"] if c in final_recovery.columns]
-
-            st.dataframe(final_recovery[preview_cols], use_container_width=True)
-
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                st.download_button(
-                    "⬇️ Download Expired Fleet Calling List (CSV)",
-                    final_recovery[preview_cols].to_csv(index=False),
-                    "zoho_expired_fleet_calling_list.csv",
-                    "text/csv",
-                    key="dl_btn_calling_list"
-                )
-            with col_d2:
-                st.download_button(
-                    "⬇️ Download Expired Fleet Email List (CSV)",
-                    valid_emails[preview_cols].to_csv(index=False),
-                    "zoho_expired_fleet_email_list.csv",
-                    "text/csv",
-                    key="dl_btn_email_list"
-                )
-        else:
-            st.error("Could not find 'Plate Number' or 'Deal Name' in the uploaded Deals file.")
-    else:
-        st.error(f"Could not find a link column. Looked for '{deal_link_col}' in Deals and '{cust_link_col}' in Customer file.")
+if not deals_path or not cust_path:
+    st.info("Zoho exports were not found. Expected Deals_*.csv and Customer_*.csv in the repository.")
 else:
-    st.info("No Zoho export files found in repository root (expected files named like `Deals_YYYY_MM_DD.csv` and `Customer_YYYY_MM_DD.csv`).")
+    st.caption(f"Using Zoho export files: `{os.path.basename(deals_path)}` and `{os.path.basename(cust_path)}`")
+    try:
+        deals_df = safe_read_file(deals_path)
+        cust_df = safe_read_file(cust_path)
+        deals_df.columns = deals_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+        cust_df.columns = cust_df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+
+        # The provided Zoho exports use Customer Name.id and Record Id.
+        if "Customer Name.id" in deals_df.columns:
+            deal_link_col = "Customer Name.id"
+        elif "Accounts Name.id" in deals_df.columns:
+            deal_link_col = "Accounts Name.id"
+        else:
+            deal_link_col = None
+        cust_link_col = "Record Id" if "Record Id" in cust_df.columns else None
+
+        if deal_link_col is None or cust_link_col is None:
+            missing = []
+            if deal_link_col is None:
+                missing.append("Customer Name.id / Accounts Name.id in Deals")
+            if cust_link_col is None:
+                missing.append("Record Id in Customers")
+            st.warning("Zoho matching skipped because required columns are missing: " + "; ".join(missing))
+        elif "plate_number" not in df.columns:
+            st.warning("Zoho matching skipped because the fleet report has no recognised plate/registration column.")
+        else:
+            # Clean IDs and remove blank/placeholder keys to avoid false customer matches.
+            deals_df["_zoho_customer_id"] = deals_df[deal_link_col].fillna("").astype(str).str.strip()
+            cust_df["_zoho_customer_id"] = cust_df[cust_link_col].fillna("").astype(str).str.strip()
+            cust_df = cust_df[cust_df["_zoho_customer_id"].ne("")].drop_duplicates("_zoho_customer_id", keep="last")
+            zoho_merged = deals_df.merge(
+                cust_df, on="_zoho_customer_id", how="left", suffixes=("_deal", "_cust")
+            )
+
+            def _zoho_normalize_plate(value):
+                if pd.isna(value):
+                    return ""
+                return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+            expired_units = df[df["days_to_expiry"] < 0].copy()
+            expired_units["match_plate"] = expired_units["plate_number"].apply(_zoho_normalize_plate)
+            deal_plate_col = next((c for c in ["Plate Number", "plate_number", "Registration Number", "Vehicle Registration Number"] if c in zoho_merged.columns), None)
+
+            if deal_plate_col is None:
+                st.warning("Zoho matching skipped: no plate/registration column was found in the Deals export.")
+            else:
+                zoho_merged["match_plate"] = zoho_merged[deal_plate_col].apply(_zoho_normalize_plate)
+                expired_units = expired_units[expired_units["match_plate"].ne("")]
+                zoho_merged = zoho_merged[zoho_merged["match_plate"].ne("")]
+                final_recovery = expired_units.merge(zoho_merged, on="match_plate", how="inner")
+
+                phone_raw = first_existing_col(final_recovery, ["Phone_cust", "Phone", "Phone Number_cust", "Phone Number"])
+                email_raw = first_existing_col(final_recovery, ["Email_cust", "Email", "Customer Email_cust", "Customer Email"])
+                final_recovery["phone_clean"] = phone_raw.apply(normalize_number)
+                final_recovery["email_clean"] = email_raw.fillna("").astype(str).str.strip().str.lower()
+
+                valid_calls = final_recovery[final_recovery["phone_clean"].ne("")]
+                valid_emails = final_recovery[
+                    final_recovery["email_clean"].ne("")
+                    & final_recovery["email_clean"].ne("nan")
+                    & ~final_recovery["email_clean"].isin(EXCLUDED_EMAILS)
+                    & ~final_recovery["email_clean"].str.contains("cartracker|catracker", case=False, na=False)
+                ]
+
+                st.success(f"Matched {len(final_recovery):,} expired vehicles to Zoho records by plate number.")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Matched Expired Units", f"{len(final_recovery):,}")
+                m2.metric("Phone Numbers for Calling", f"{len(valid_calls):,}")
+                m3.metric("Customer Emails", f"{len(valid_emails):,}")
+
+                customer_name_col = next((c for c in ["Customer Name_cust", "Customer Name", "First Name_cust"] if c in final_recovery.columns), None)
+                preview_cols = [c for c in ["plate_number", "name", "expiration_date", customer_name_col, "phone_clean", "email_clean"] if c and c in final_recovery.columns]
+                st.dataframe(final_recovery[preview_cols], use_container_width=True)
+
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    st.download_button(
+                        "⬇️ Download Expired Fleet Calling List (CSV)",
+                        final_recovery[preview_cols].to_csv(index=False).encode("utf-8"),
+                        "zoho_expired_fleet_calling_list.csv", "text/csv", key="dl_btn_calling_list"
+                    )
+                with col_d2:
+                    st.download_button(
+                        "⬇️ Download Expired Fleet Email List (CSV)",
+                        valid_emails[preview_cols].to_csv(index=False).encode("utf-8"),
+                        "zoho_expired_fleet_email_list.csv", "text/csv", key="dl_btn_email_list"
+                    )
+    except Exception as exc:
+        st.error("The Zoho recovery linker encountered an error, but the rest of the dashboard will continue loading.")
+        st.caption(f"Zoho linker diagnostic: {type(exc).__name__}: {exc}")
 
 # ==========================================
-# 8. IMEI Vehicle & Customer Lookup
+# Live tracking API IMEI lookup (Protrack OpenAPI)
+# ==========================================
+st.write("---")
+st.markdown('<div class="icon-header">🌐 Live Tracking API Lookup</div>', unsafe_allow_html=True)
+st.caption("Uses the API specification's login → user_api_hash → get_devices flow. Configure credentials in Streamlit Secrets; do not put passwords in this file.")
+
+# Secrets expected in Streamlit Cloud: TRACKING_API_BASE_URL, TRACKING_API_EMAIL, TRACKING_API_PASSWORD
+try:
+    _api_base = str(st.secrets.get("TRACKING_API_BASE_URL", "https://app.protrack.ng/api")).rstrip("/")
+    _api_email = str(st.secrets.get("TRACKING_API_EMAIL", "")).strip()
+    _api_password = str(st.secrets.get("TRACKING_API_PASSWORD", "")).strip()
+except Exception:
+    _api_base = "https://app.protrack.ng/api"
+    _api_email = ""
+    _api_password = ""
+
+api_imei = st.text_input("Search live API by IMEI", placeholder="Enter IMEI", key="live_api_imei_input").strip()
+if st.button("Search Live Tracking API", key="live_api_imei_button", type="primary"):
+    if not api_imei:
+        st.warning("Enter an IMEI first.")
+    elif not _api_email or not _api_password:
+        st.error("Live API credentials are not configured. In Streamlit Cloud, open App settings → Secrets and add TRACKING_API_EMAIL, TRACKING_API_PASSWORD, and TRACKING_API_BASE_URL if CarTracker supplied a different API URL.")
+    else:
+        try:
+            with st.spinner("Authenticating and retrieving live device data..."):
+                login_response = requests.post(
+                    f"{_api_base}/login",
+                    files={"email": (None, _api_email), "password": (None, _api_password)},
+                    timeout=25,
+                )
+                login_response.raise_for_status()
+                login_data = login_response.json()
+                api_hash = login_data.get("user_api_hash")
+                if not api_hash or login_data.get("status") == 0:
+                    st.error("The API did not return an authentication token. Check the API URL and credentials.")
+                else:
+                    devices_response = requests.get(
+                        f"{_api_base}/get_devices",
+                        params={"lang": "en", "user_api_hash": api_hash},
+                        timeout=45,
+                    )
+                    devices_response.raise_for_status()
+                    devices_payload = devices_response.json()
+                    device_items = []
+                    if isinstance(devices_payload, list):
+                        for group in devices_payload:
+                            if isinstance(group, dict):
+                                items = group.get("items", [])
+                                if isinstance(items, list):
+                                    device_items.extend(x for x in items if isinstance(x, dict))
+                    elif isinstance(devices_payload, dict):
+                        possible = devices_payload.get("items", devices_payload.get("data", []))
+                        if isinstance(possible, list):
+                            device_items.extend(x for x in possible if isinstance(x, dict))
+                    target_imei = re.sub(r"\D", "", api_imei)
+                    matched_devices = []
+                    for item in device_items:
+                        details = item.get("device_data", {}) if isinstance(item.get("device_data"), dict) else {}
+                        candidate = re.sub(r"\D", "", str(details.get("imei", item.get("imei", ""))))
+                        if candidate and candidate == target_imei:
+                            matched_devices.append((item, details))
+                    if not matched_devices:
+                        st.warning(f"No device with IMEI {api_imei} was returned by the live API. The API returned {len(device_items):,} device records. Confirm that this account has access to the device.")
+                    else:
+                        for n, (item, details) in enumerate(matched_devices, start=1):
+                            st.markdown(f"**Live API match {n}**")
+                            live_fields = {
+                                "IMEI": details.get("imei", api_imei),
+                                "Vehicle / Device Name": details.get("name", item.get("name", "")),
+                                "Registration / Plate": details.get("plate_number", details.get("registration_number", "")),
+                                "VIN / Chassis": details.get("vin", ""),
+                                "Device Model": details.get("device_model", ""),
+                                "SIM Number": details.get("sim_number", ""),
+                                "Customer / Owner": details.get("object_owner", ""),
+                                "Subscription Expiry": details.get("expiration_date", ""),
+                                "Last Connection / Position Time": item.get("time", ""),
+                                "Online Status": item.get("online", ""),
+                                "Speed": item.get("speed", ""),
+                                "Last Address": item.get("address", ""),
+                                "Protocol": item.get("protocol", details.get("protocol", "")),
+                            }
+                            st.dataframe(pd.DataFrame([{"Field": k, "Value": ("" if v is None else str(v))} for k, v in live_fields.items()]), hide_index=True, use_container_width=True)
+        except requests.exceptions.Timeout:
+            st.error("The tracking API timed out. Check that the configured API server is reachable from Streamlit Cloud.")
+        except requests.exceptions.HTTPError as exc:
+            code = exc.response.status_code if exc.response is not None else "unknown"
+            st.error(f"Tracking API returned HTTP {code}. Verify the API base URL, endpoint availability, and credentials. No password is displayed.")
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            st.error(f"Could not complete the live API lookup ({type(exc).__name__}). Check the API server URL and response format.")
+        except Exception as exc:
+            st.error(f"Live API lookup failed safely: {type(exc).__name__}: {exc}")
+
+# ==========================================
+# 9. IMEI Vehicle & Customer Lookup
 # ==========================================
 st.write("---")
 st.markdown('<div class="icon-header">🔎 IMEI Vehicle & Customer Lookup</div>', unsafe_allow_html=True)
